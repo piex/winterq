@@ -1,10 +1,29 @@
-CC = gcc
-QUICKJS_PATH = ./quickjs
-CFLAGS = -I$(QUICKJS_PATH) -Wall
-LDFLAGS = $(QUICKJS_PATH)/libquickjs.a
+.PHONY: quickjs libuv clean
 
-main: main.c $(QUICKJS_PATH)/libquickjs.a
-	$(CC) $(CFLAGS) -lcurl -o main main.c $(LDFLAGS)
+CC = gcc
+PWD = $(shell pwd)
+QUICKJS_PATH = $(PWD)/deps/quickjs
+LIBUV_PATH = $(PWD)/deps/uv
+
+CFLAGS = -I$(QUICKJS_PATH) -I$(LIBUV_PATH)/include -Wall -O2
+LDFLAGS = $(QUICKJS_PATH)/libquickjs.a $(LIBUV_PATH)/.libs/libuv.a 
+
+# target
+TARGET = winterq
+
+# source
+SRCS = main.c
+
+$(TARGET): $(SRCS)
+	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS) $(LDFLAGS)
+
+quickjs:
+	cd ${QUICKJS_PATH} && make
+
+libuv:
+	cd ${LIBUV_PATH} && ./autogen.sh && ./configure && make
 
 clean:
-	rm -f main
+	rm -f $(TARGET)
+	cd ${QUICKJS_PATH} && make clean
+	cd ${LIBUV_PATH} && make clean
