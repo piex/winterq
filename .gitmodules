@@ -1,3 +1,6 @@
 [submodule "quickjs"]
-	path = quickjs
+	path = deps/quickjs
 	url = https://github.com/bellard/quickjs.git
+[submodule "libuv"]
+	path = deps/uv
+	url = https://github.com/libuv/libuv.git
