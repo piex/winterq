@@ -4,6 +4,14 @@
 #include "eventloop.h"
 #include "console.h"
 
+// 线程数据
+typedef struct
+{
+  ThreadPool *pool;
+  int thread_id;
+  JSRuntime *runtime;
+} ThreadData;
+
 // 初始化任务队列
 static void init_task_queue(TaskQueue *queue)
 {
@@ -84,6 +92,8 @@ static int eval_js(JSContext *ctx, const char *js_code)
     return 1;
   }
   JS_FreeValue(ctx, val);
+
+  execute_microtask_timer(ctx);
   return 0;
 }
 
@@ -112,10 +122,29 @@ static void execute_task(JSRuntime *runtime, Task *task)
 
   // 清理 JSContext
   JS_FreeContext(ctx);
-  JS_RunGC(JS_GetRuntime(ctx));
+  // JS_RunGC(runtime);
 
   end = clock();
   task->execution_time = ((double)(end - start)) / CLOCKS_PER_SEC;
+}
+
+// 任务完成时的回调函数
+static void on_task_complete(uv_async_t *handle)
+{
+  ThreadData *thread_data = (ThreadData *)handle->data;
+  ThreadPool *pool = thread_data->pool;
+
+  uv_mutex_lock(&pool->completed_mutex);
+  // 检查是否有完成的任务需要处理
+  if (pool->completed_tasks > 0)
+  {
+    // 如果所有任务都完成了，发出信号
+    if (pool->completed_tasks >= pool->max_tasks)
+    {
+      uv_cond_signal(&pool->all_completed);
+    }
+  }
+  uv_mutex_unlock(&pool->completed_mutex);
 }
 
 // 线程工作函数
@@ -220,8 +249,9 @@ static void worker_thread(void *arg)
 
       pool->task_execution_times[task.task_id - 1].task_id = task.task_id;
       pool->task_execution_times[task.task_id - 1].execution_time = task.execution_time;
-      pool->completed_tasks++;
 
+      // 通知事件循环有任务完成
+      uv_async_send(&pool->task_complete_async);
       uv_cond_signal(&pool->all_completed);
       uv_mutex_unlock(&pool->completed_mutex);
 
@@ -251,7 +281,6 @@ ThreadPool *init_thread_pool(int thread_count)
   pool->thread_count = thread_count;
   pool->threads = (uv_thread_t *)malloc(thread_count * sizeof(uv_thread_t));
   pool->shutdown = 0;
-  pool->completed_tasks = 0;
   pool->max_tasks = 0;
   pool->task_execution_times = NULL;
 
@@ -288,6 +317,8 @@ ThreadPool *init_thread_pool(int thread_count)
       return NULL;
     }
   }
+
+  pool->task_complete_async.data = thread_data;
 
   return pool;
 }

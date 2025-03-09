@@ -10,6 +10,29 @@
 #include "../console.c"
 #include "./file.c"
 
+// 用于追踪任务完成状态的结构体
+typedef struct
+{
+  ThreadPool *pool;
+  int total_tasks;
+  uv_timer_t timer;
+  int *done;
+} TaskMonitor;
+
+// 检查任务完成状态的定时器回调
+void check_completion(uv_timer_t *handle)
+{
+  TaskMonitor *monitor = (TaskMonitor *)handle->data;
+
+  uv_mutex_lock(&monitor->pool->completed_mutex);
+  if (monitor->pool->completed_tasks >= monitor->total_tasks)
+  {
+    *monitor->done = 1;
+    uv_timer_stop(handle);
+  }
+  uv_mutex_unlock(&monitor->pool->completed_mutex);
+}
+
 // 回调函数示例
 void task_callback(void *arg)
 {
@@ -33,10 +56,10 @@ int main(int argc, char **argv)
     return 1;
   }
 
+  // 初始化 libuv
   init_loop();
 
-  clock_t start,
-      end;
+  clock_t start, end;
   start = clock();
 
   // JS文件数量
@@ -47,7 +70,7 @@ int main(int argc, char **argv)
   // 创建线程池（线程数等于处理器核心数）
   int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
 
-  printf("Creating thread pool with %d threads for %d tasks\n", num_cores, total_tasks);
+  printf("Creating thread pool with %d threads\n", num_cores);
   // 初始化线程池
   ThreadPool *pool = init_thread_pool(num_cores);
 
@@ -70,14 +93,25 @@ int main(int argc, char **argv)
 
   printf("Added %d tasks to the queue\n", total_tasks);
 
-  // 等待所有任务完成
-  uv_mutex_lock(&pool->completed_mutex);
+  // 设置任务监控
+  int done = 0;
+  TaskMonitor monitor = {
+      .pool = pool,
+      .total_tasks = total_tasks,
+      .done = &done};
 
-  while (pool->completed_tasks < total_tasks)
+  // 创建定时器来检查任务完成状态
+  uv_timer_init(loop, &monitor.timer);
+  monitor.timer.data = &monitor;
+  uv_timer_start(&monitor.timer, check_completion, 0, 100); // 每100ms检查一次
+
+  // 运行事件循环，直到所有任务完成
+  while (!done)
   {
-    uv_cond_wait(&pool->all_completed, &pool->completed_mutex);
+    uv_run(loop, UV_RUN_NOWAIT);
+    // 给其他线程一些时间来处理任务
+    usleep(1000);
   }
-  uv_mutex_unlock(&pool->completed_mutex);
 
   // 打印结果
   printf("\nExecution Results:\n");

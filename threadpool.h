@@ -39,25 +39,18 @@ typedef struct
 typedef struct
 {
   uv_thread_t *threads;
-  int thread_count;
+  int thread_count; // 线程数
   int shutdown;
-  uv_mutex_t shutdown_mutex;
-  int completed_tasks;
+  int completed_tasks; // 已执行任务
   int max_tasks;
   uv_mutex_t completed_mutex;
+  uv_mutex_t shutdown_mutex;
+  uv_async_t task_complete_async;
   uv_cond_t all_completed;
 
   TaskQueue queue;
   TaskExecutionTime *task_execution_times;
 } ThreadPool;
-
-// 线程数据
-typedef struct
-{
-  ThreadPool *pool;
-  int thread_id;
-  JSRuntime *runtime;
-} ThreadData;
 
 // API declarations
 ThreadPool *init_thread_pool(int thread_count);
