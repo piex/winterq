@@ -1,7 +1,7 @@
 {
   "files.associations": {
-    "eventloop.h": "c",
-    "threadpool.h": "c",
+    "*.css": "scss",
+    "quickjs.h": "c",
     "console.h": "c"
   }
 }

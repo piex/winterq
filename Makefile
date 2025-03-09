@@ -1,4 +1,4 @@
-.PHONY: quickjs libuv clean test_threadpool
+.PHONY: quickjs libuv clean test_runtime test_threadpool
 
 CC = gcc
 PWD = $(shell pwd)
@@ -28,6 +28,16 @@ clean:
 	cd ${QUICKJS_PATH} && make clean
 	cd ${LIBUV_PATH} && make clean
 
+test_runtime:
+	$(CC) $(CFLAGS) -o test_runtime ./tests/test_runtime.c $(LDFLAGS) &&  \
+	./test_runtime \
+		./tests/test1.js \
+		./tests/test2.js \
+		./tests/test3.js \
+		./tests/test4.js \
+		./tests/test5.js \
+		./tests/test6.js && \
+	rm -rf ./test_runtime
 
 test_threadpool:
 	$(CC) $(CFLAGS) -o test_threadpool ./tests/test_threadpool.c $(LDFLAGS) &&  \
@@ -39,3 +49,5 @@ test_threadpool:
 		./tests/test5.js \
 		./tests/test6.js 10 && \
 	rm -rf ./test_threadpool
+
+

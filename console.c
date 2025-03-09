@@ -1,6 +1,8 @@
 #include <quickjs.h>
 #include <stdio.h>
 
+#include "console.h"
+
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
 
 // ANSI Color

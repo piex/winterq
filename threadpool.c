@@ -1,8 +1,9 @@
+#include <quickjs.h>
 #include <uv.h>
 
-#include "threadpool.h"
-#include "eventloop.h"
 #include "console.h"
+#include "eventloop.h"
+#include "threadpool.h"
 
 // 线程数据
 typedef struct
@@ -116,8 +117,7 @@ static void execute_task(JSRuntime *runtime, Task *task)
 
   if (eval_js(ctx, task->js_code) < 0)
   {
-    fprintf(stderr, "Error executing js in task %d\n",
-            task->task_id);
+    fprintf(stderr, "Error executing js in task %d\n", task->task_id);
   }
 
   // 清理 JSContext
@@ -237,8 +237,9 @@ static void worker_thread(void *arg)
       {
         int old_max = pool->max_tasks;
         pool->max_tasks = task.task_id;
-        pool->task_execution_times = realloc(pool->task_execution_times,
-                                             pool->max_tasks * sizeof(TaskExecutionTime));
+        pool->task_execution_times =
+            realloc(pool->task_execution_times,
+                    pool->max_tasks * sizeof(TaskExecutionTime));
         // 初始化新分配的内存
         for (int i = old_max; i < pool->max_tasks; i++)
         {
@@ -248,7 +249,8 @@ static void worker_thread(void *arg)
       }
 
       pool->task_execution_times[task.task_id - 1].task_id = task.task_id;
-      pool->task_execution_times[task.task_id - 1].execution_time = task.execution_time;
+      pool->task_execution_times[task.task_id - 1].execution_time =
+          task.execution_time;
 
       // 通知事件循环有任务完成
       uv_async_send(&pool->task_complete_async);
@@ -301,8 +303,8 @@ ThreadPool *init_thread_pool(int thread_count)
     thread_data[i].thread_id = i;
     thread_data[i].runtime = NULL;
 
-    if (uv_thread_create(&pool->threads[i], worker_thread,
-                         &thread_data[i]) != 0)
+    if (uv_thread_create(&pool->threads[i], worker_thread, &thread_data[i]) !=
+        0)
     {
       fprintf(stderr, "Failed to create thread %d\n", i);
       // 清理已创建的线程
@@ -324,7 +326,8 @@ ThreadPool *init_thread_pool(int thread_count)
 }
 
 // 添加任务到线程池
-void add_task_to_pool(ThreadPool *pool, const char *js_code, void (*callback)(void *), void *callback_arg)
+void add_task_to_pool(ThreadPool *pool, const char *js_code,
+                      void (*callback)(void *), void *callback_arg)
 {
   static int task_id = 1;
   Task task;
