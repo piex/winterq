@@ -1,0 +1,7 @@
+{
+  "files.associations": {
+    "eventloop.h": "c",
+    "threadpool.h": "c",
+    "console.h": "c"
+  }
+}
