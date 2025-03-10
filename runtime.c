@@ -4,7 +4,7 @@
 #include "console.h"
 #include "console.c"
 
-static JSClassID js_worker_runtime_class_id;
+static JSClassID js_worker_context_class_id;
 
 typedef struct
 {
@@ -16,15 +16,22 @@ typedef struct
 
   uv_loop_t *loop; // uv事件循环
   int next_timer_id;
-  int active_timers;
   uv_timer_t microtask_timer; // 用于执行微任务的定时器
 } WorkerRuntime;
+
+typedef struct
+{
+  JSContext *js_context;
+  int active_timers;
+
+  WorkerRuntime *runtime;
+} WorkerContext;
 
 // 定时器结构体，用于跟踪定时器
 typedef struct
 {
   uv_timer_t timer;
-  WorkerRuntime *runtime;
+  WorkerContext *wctx;
   JSContext *ctx;
   JSValue callback;
   int timer_id;
@@ -46,7 +53,6 @@ WorkerRuntime *Worker_NewRuntime(int max_context)
   wrt->max_context = max_context;
   wrt->context_count = 0;
   wrt->next_timer_id = 1;
-  wrt->active_timers = 0;
 
   uv_mutex_init(&wrt->context_mutex);
   // 初始化微任务定时器
@@ -57,21 +63,47 @@ WorkerRuntime *Worker_NewRuntime(int max_context)
   return wrt;
 }
 
-static WorkerRuntime *wrt_get_from_context(JSContext *ctx)
+void Worker_FreeRuntime(WorkerRuntime *wrt)
+{
+  uv_timer_stop(&wrt->microtask_timer);
+  uv_mutex_destroy(&wrt->context_mutex);
+  uv_loop_close(wrt->loop);
+  JS_FreeRuntime(wrt->js_runtime);
+  free(wrt);
+}
+
+void Worker_FreeContext(WorkerContext *wctx)
+{
+  JS_FreeContext(wctx->js_context);
+  free(wctx);
+}
+
+static WorkerContext *get_worker_context(JSContext *ctx)
 {
   JSValue global_obj = JS_GetGlobalObject(ctx);
-  JSValue js_wrt = JS_GetPropertyStr(ctx, global_obj, "__worker_runtime__");
-  WorkerRuntime *wrt = JS_GetOpaque(js_wrt, js_worker_runtime_class_id);
-  JS_FreeValue(ctx, js_wrt);
+  JSValue js_wctx = JS_GetPropertyStr(ctx, global_obj, "__worker_context__");
+  if (JS_IsException(js_wctx) || JS_IsUndefined(js_wctx))
+  {
+    fprintf(stderr, "Failed to get __worker_context__ property\n");
+    JS_FreeValue(ctx, global_obj);
+    return NULL;
+  }
+  WorkerContext *wctx = JS_GetOpaque(js_wctx, js_worker_context_class_id);
+  JS_FreeValue(ctx, js_wctx);
   JS_FreeValue(ctx, global_obj);
+  if (!wctx)
+  {
+    fprintf(stderr, "Failed to get opaque wrt\n");
+    return NULL;
+  }
 
-  return wrt;
+  return wctx;
 }
 
 // 执行 QuickJS 的微任务队列
 void execute_microtask_timer(JSContext *ctx)
 {
-  // JSContext *ctx = (JSContext *)handle->data;
+  JSContext *current_ctx = ctx; // 保存原始上下文引用
   JSRuntime *rt = JS_GetRuntime(ctx);
 
   // 执行所有待处理的任务
@@ -81,15 +113,15 @@ void execute_microtask_timer(JSContext *ctx)
     hasPending = JS_ExecutePendingJob(rt, &ctx);
   } while (hasPending > 0);
 
+  WorkerContext *wctx = get_worker_context(current_ctx);
   // 检查是否可以释放上下文
-  WorkerRuntime *wrt = wrt_get_from_context(ctx);
-  if (wrt && wrt->active_timers == 0)
+  if (wctx && wctx->active_timers == 0)
   {
     // 没有活跃的定时器，可以安全地释放上下文
-    uv_mutex_lock(&wrt->context_mutex);
-    wrt->context_count--;
-    uv_mutex_unlock(&wrt->context_mutex);
-    JS_FreeContext(ctx);
+    JS_FreeContext(current_ctx);
+    uv_mutex_lock(&wctx->runtime->context_mutex);
+    wctx->runtime->context_count--;
+    uv_mutex_unlock(&wctx->runtime->context_mutex);
   }
 }
 
@@ -97,17 +129,17 @@ void execute_microtask_timer(JSContext *ctx)
 void close_timer_callback(uv_handle_t *handle)
 {
   timer_data_t *timer_data = (timer_data_t *)handle->data;
-  WorkerRuntime *wrt = timer_data->runtime;
+  WorkerContext *wctx = timer_data->wctx;
   JSContext *ctx = timer_data->ctx;
 
   // 释放JS回调函数
   JS_FreeValue(ctx, timer_data->callback);
   free(timer_data);
   // 减少活跃定时器计数
-  wrt->active_timers--;
+  wctx->active_timers--;
 
   // 如果这是最后一个定时器，执行微任务并可能释放上下文
-  if (wrt->active_timers == 0)
+  if (wctx->active_timers == 0)
   {
     execute_microtask_timer(ctx);
   }
@@ -144,13 +176,6 @@ void timer_callback(uv_timer_t *handle)
 static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val, int argc,
                              JSValueConst *argv)
 {
-  WorkerRuntime *wrt = wrt_get_from_context(ctx);
-
-  if (!wrt)
-  {
-    return JS_ThrowInternalError(ctx, "Worker runtime not found");
-  }
-
   if (argc < 2 || !JS_IsFunction(ctx, argv[0]))
   {
     return JS_ThrowTypeError(ctx, "setTimeout requires a function and delay");
@@ -162,6 +187,13 @@ static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val, int argc,
     return JS_ThrowTypeError(ctx, "Invalid delay value");
   }
 
+  WorkerContext *wctx = get_worker_context(ctx);
+
+  if (!wctx)
+  {
+    return JS_ThrowInternalError(ctx, "Worker context not found");
+  }
+
   // 创建定时器数据
   timer_data_t *timer_data = malloc(sizeof(timer_data_t));
   if (!timer_data)
@@ -169,17 +201,18 @@ static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val, int argc,
     return JS_ThrowOutOfMemory(ctx);
   }
 
+  WorkerRuntime *wrt = wctx->runtime;
   // 初始化定时器
   uv_timer_init(wrt->loop, &timer_data->timer);
   timer_data->ctx = ctx;
-  timer_data->runtime = wrt;
+  timer_data->wctx = wctx;
   timer_data->callback = JS_DupValue(ctx, argv[0]);
   timer_data->timer_id = wrt->next_timer_id++;
   timer_data->timer.data = timer_data;
 
   // 启动定时器
   uv_timer_start(&timer_data->timer, timer_callback, delay, 0);
-  wrt->active_timers++;
+  wctx->active_timers++;
 
   return JS_NewInt32(ctx, timer_data->timer_id);
 }
@@ -203,16 +236,17 @@ void clear_timeout_walk(uv_handle_t *handle, void *arg)
 static JSValue js_clearTimeout(JSContext *ctx, JSValueConst this_val, int argc,
                                JSValueConst *argv)
 {
-  WorkerRuntime *wrt = wrt_get_from_context(ctx);
-
-  if (!wrt)
-  {
-    return JS_ThrowInternalError(ctx, "Worker runtime not found");
-  }
 
   if (argc < 1)
   {
     return JS_UNDEFINED;
+  }
+
+  WorkerContext *wctx = get_worker_context(ctx);
+
+  if (!wctx)
+  {
+    return JS_ThrowInternalError(ctx, "Worker context not found");
   }
 
   int timer_id = 0;
@@ -220,6 +254,8 @@ static JSValue js_clearTimeout(JSContext *ctx, JSValueConst this_val, int argc,
   {
     return JS_ThrowTypeError(ctx, "Invalid timer ID");
   }
+
+  WorkerRuntime *wrt = wctx->runtime;
 
   // 遍历所有活跃的定时器，查找匹配的ID
   uv_walk(wrt->loop, clear_timeout_walk, &timer_id);
@@ -240,7 +276,7 @@ void js_std_init_timeout(JSContext *ctx)
   JS_FreeValue(ctx, global_obj);
 }
 
-JSContext *Worker_NewContext(WorkerRuntime *wrt)
+WorkerContext *Worker_NewContext(WorkerRuntime *wrt)
 {
   uv_mutex_lock(&wrt->context_mutex);
   if (wrt->context_count >= wrt->max_context)
@@ -249,33 +285,42 @@ JSContext *Worker_NewContext(WorkerRuntime *wrt)
     return NULL;
   }
 
+  WorkerContext *wctx = malloc(sizeof(WorkerContext));
+  if (!wctx)
+  {
+    return NULL;
+  }
   JSContext *ctx = JS_NewContext(wrt->js_runtime);
   wrt->context_count++;
   uv_mutex_unlock(&wrt->context_mutex);
+  wctx->js_context = ctx;
+  wctx->active_timers = 0;
+  wctx->runtime = wrt;
 
   JSValue global = JS_GetGlobalObject(ctx);
 
-  JSValue js_wrt = JS_NewObjectClass(ctx, js_worker_runtime_class_id);
-  JS_SetOpaque(js_wrt, wrt);
-  JS_SetPropertyStr(ctx, global, "__worker_runtime__", js_wrt);
+  JSValue js_wctx = JS_NewObjectClass(ctx, js_worker_context_class_id);
+  JS_SetOpaque(js_wctx, wctx);
+  JS_SetPropertyStr(ctx, global, "__worker_context__", js_wctx);
 
   js_std_init_console(ctx);
   js_std_init_timeout(ctx);
 
   JS_FreeValue(ctx, global);
 
-  return ctx;
+  return wctx;
 }
 
 int Worker_Eval_JS(WorkerRuntime *wrt, char *script)
 {
-  JSContext *ctx = Worker_NewContext(wrt);
-  if (!ctx)
+  WorkerContext *wctx = Worker_NewContext(wrt);
+  if (!wctx)
   {
     fprintf(stderr, "Failed to create new context\n");
     return 1;
   }
 
+  JSContext *ctx = wctx->js_context;
   JSValue result =
       JS_Eval(ctx, script, strlen(script), "<input>", JS_EVAL_TYPE_MODULE);
   if (JS_IsException(result))
@@ -292,22 +337,9 @@ int Worker_Eval_JS(WorkerRuntime *wrt, char *script)
   JS_FreeValue(ctx, result);
 
   // 处理可能产生的异步任务
-  // 只有在没有活跃定时器时才释放上下文
-  if (wrt->active_timers == 0)
-  {
-    execute_microtask_timer(ctx);
-  }
-  // 否则上下文会在最后一个定时器完成时释放
+  execute_microtask_timer(ctx);
 
   return 0;
-}
-
-void Worker_FreeRuntime(WorkerRuntime *wrt)
-{
-  uv_timer_stop(&wrt->microtask_timer);
-  uv_mutex_destroy(&wrt->context_mutex);
-  uv_loop_close(wrt->loop);
-  JS_FreeRuntime(wrt->js_runtime);
 }
 
 void Worker_RunLoop(WorkerRuntime *wrt)

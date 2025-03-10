@@ -33,6 +33,7 @@ int main(int argc, char **argv)
   }
 
   Worker_RunLoop(wrt);
+  fprintf(stderr, "finish uv loop\n");
 
   Worker_FreeRuntime(wrt);
 }
