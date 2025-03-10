@@ -1,7 +1,0 @@
-{
-  "files.associations": {
-    "*.css": "scss",
-    "quickjs.h": "c",
-    "console.h": "c"
-  }
-}

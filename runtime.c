@@ -45,8 +45,19 @@ WorkerRuntime *Worker_NewRuntime(int max_context)
     return NULL;
   }
   JSRuntime *rt = JS_NewRuntime();
+  if (!rt)
+  {
+    free(wrt);
+    return NULL;
+  }
 
   uv_loop_t *loop = uv_loop_new();
+  if (!loop)
+  {
+    JS_FreeRuntime(rt);
+    free(wrt);
+    return NULL;
+  }
 
   wrt->js_runtime = rt;
   wrt->loop = loop;
@@ -75,6 +86,9 @@ void Worker_FreeRuntime(WorkerRuntime *wrt)
 void Worker_FreeContext(WorkerContext *wctx)
 {
   JS_FreeContext(wctx->js_context);
+  uv_mutex_lock(&wctx->runtime->context_mutex);
+  wctx->runtime->context_count--;
+  uv_mutex_unlock(&wctx->runtime->context_mutex);
   free(wctx);
 }
 
@@ -106,22 +120,26 @@ void execute_microtask_timer(JSContext *ctx)
   JSContext *current_ctx = ctx; // 保存原始上下文引用
   JSRuntime *rt = JS_GetRuntime(ctx);
 
-  // 执行所有待处理的任务
+  // 执行所有待处理的任务，但限制最大执行次数以避免无限循环
   int hasPending;
+  int max_iterations = 1000; // 设置一个合理的上限
+  int count = 0;
   do
   {
     hasPending = JS_ExecutePendingJob(rt, &ctx);
-  } while (hasPending > 0);
+    count++;
+  } while (hasPending > 0 && count < max_iterations);
+
+  if (count >= max_iterations && hasPending > 0)
+  {
+    fprintf(stderr, "Warning: Reached maximum microtask iterations\n");
+  }
 
   WorkerContext *wctx = get_worker_context(current_ctx);
   // 检查是否可以释放上下文
   if (wctx && wctx->active_timers == 0)
   {
-    // 没有活跃的定时器，可以安全地释放上下文
-    JS_FreeContext(current_ctx);
-    uv_mutex_lock(&wctx->runtime->context_mutex);
-    wctx->runtime->context_count--;
-    uv_mutex_unlock(&wctx->runtime->context_mutex);
+    Worker_FreeContext(wctx);
   }
 }
 
@@ -292,10 +310,10 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt)
   }
   JSContext *ctx = JS_NewContext(wrt->js_runtime);
   wrt->context_count++;
-  uv_mutex_unlock(&wrt->context_mutex);
   wctx->js_context = ctx;
   wctx->active_timers = 0;
   wctx->runtime = wrt;
+  uv_mutex_unlock(&wrt->context_mutex);
 
   JSValue global = JS_GetGlobalObject(ctx);
 
@@ -345,4 +363,10 @@ int Worker_Eval_JS(WorkerRuntime *wrt, char *script)
 void Worker_RunLoop(WorkerRuntime *wrt)
 {
   uv_run(wrt->loop, UV_RUN_DEFAULT);
+}
+
+// 允许非阻塞式运行事件循环
+int Worker_RunLoopOnce(WorkerRuntime *wrt)
+{
+  return uv_run(wrt->loop, UV_RUN_NOWAIT);
 }

@@ -49,5 +49,3 @@ test_threadpool:
 		./tests/test5.js \
 		./tests/test6.js 10 && \
 	rm -rf ./test_threadpool
-
-

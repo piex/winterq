@@ -8,7 +8,7 @@ const id2 = setTimeout(() => {
 }, 2000);
 
 const id3 = setTimeout(() => {
-	throw Error("This should not be printed.");
+	console.error("This should not be printed.");
 }, 3000);
 
 clearTimeout(id3);
