@@ -1,31 +1,11 @@
 #include <quickjs.h>
 #include <uv.h>
 
+#include "runtime.h"
 #include "console.h"
 #include "console.c"
 
 static JSClassID js_worker_context_class_id;
-
-typedef struct
-{
-  JSRuntime *js_runtime; // 每个线程一个 JSRuntime
-
-  int max_context;          // 最多同时执行的 JSContext
-  int context_count;        // 已经初始化的 context 数量
-  uv_mutex_t context_mutex; // context 锁
-
-  uv_loop_t *loop; // uv事件循环
-  int next_timer_id;
-  uv_timer_t microtask_timer; // 用于执行微任务的定时器
-} WorkerRuntime;
-
-typedef struct
-{
-  JSContext *js_context;
-  int active_timers;
-
-  WorkerRuntime *runtime;
-} WorkerContext;
 
 // 定时器结构体，用于跟踪定时器
 typedef struct
@@ -225,7 +205,9 @@ static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val, int argc,
   timer_data->ctx = ctx;
   timer_data->wctx = wctx;
   timer_data->callback = JS_DupValue(ctx, argv[0]);
+  uv_mutex_lock(&wrt->context_mutex);
   timer_data->timer_id = wrt->next_timer_id++;
+  uv_mutex_unlock(&wrt->context_mutex);
   timer_data->timer.data = timer_data;
 
   // 启动定时器

@@ -3,6 +3,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "../runtime.h"
 #include "../runtime.c"
 #include "./file.c"
 
