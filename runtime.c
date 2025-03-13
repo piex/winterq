@@ -321,8 +321,7 @@ int Worker_Eval_JS(WorkerRuntime *wrt, char *script)
   }
 
   JSContext *ctx = wctx->js_context;
-  JSValue result =
-      JS_Eval(ctx, script, strlen(script), "<input>", JS_EVAL_TYPE_MODULE);
+  JSValue result = JS_Eval(ctx, script, strlen(script), "<input>", JS_EVAL_TYPE_MODULE);
   if (JS_IsException(result))
   {
     JSValue exc = JS_GetException(ctx);
@@ -333,6 +332,57 @@ int Worker_Eval_JS(WorkerRuntime *wrt, char *script)
       JS_FreeCString(ctx, str);
     }
     JS_FreeValue(ctx, exc);
+    JS_FreeValue(ctx, result);
+    return 1;
+  }
+  JS_FreeValue(ctx, result);
+
+  // 处理可能产生的异步任务
+  execute_microtask_timer(ctx);
+
+  return 0;
+}
+
+int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode, size_t bytecode_len)
+{
+  WorkerContext *wctx = Worker_NewContext(wrt);
+  if (!wctx)
+  {
+    fprintf(stderr, "Failed to create new context\n");
+    return 1;
+  }
+
+  JSContext *ctx = wctx->js_context;
+
+  // Load bytecode
+  JSValue loadedVal = JS_ReadObject(ctx, bytecode, bytecode_len, JS_READ_OBJ_BYTECODE);
+  if (JS_IsException(loadedVal))
+  {
+    JSValue exc = JS_GetException(ctx);
+    const char *str = JS_ToCString(ctx, exc);
+    if (str)
+    {
+      fprintf(stderr, "Error: %s\n", str);
+      JS_FreeCString(ctx, str);
+    }
+    JS_FreeValue(ctx, exc);
+    return 1;
+  }
+
+  // Execute loaded bytecode
+  JSValue result = JS_EvalFunction(ctx, loadedVal);
+  if (JS_IsException(result))
+  {
+    JSValue exc = JS_GetException(ctx);
+    const char *str = JS_ToCString(ctx, exc);
+    if (str)
+    {
+      fprintf(stderr, "Error: %s\n", str);
+      JS_FreeCString(ctx, str);
+    }
+    JS_FreeValue(ctx, exc);
+    JS_FreeValue(ctx, result);
+    return 1;
   }
   JS_FreeValue(ctx, result);
 
