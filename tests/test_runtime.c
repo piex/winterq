@@ -5,6 +5,8 @@
 
 #include "../runtime.h"
 #include "../runtime.c"
+#include "../console.h"
+#include "../console.c"
 #include "./file.c"
 
 int main(int argc, char **argv)

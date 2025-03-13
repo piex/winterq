@@ -3,7 +3,6 @@
 
 #include "runtime.h"
 #include "console.h"
-#include "console.c"
 
 static JSClassID js_worker_context_class_id;
 
