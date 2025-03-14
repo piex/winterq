@@ -1,10 +1,34 @@
-#include <quickjs.h>
 #include <uv.h>
+#include <quickjs.h>
 
 #include "runtime.h"
 #include "console.h"
 
-static JSClassID js_worker_context_class_id;
+// Global logging function to replace direct fprintf calls
+#define LOG_ERROR(format, ...) fprintf(stderr, "[ERROR] " format "\n", ##__VA_ARGS__)
+#define LOG_WARNING(format, ...) fprintf(stderr, "[WARNING] " format "\n", ##__VA_ARGS__)
+#define LOG_INFO(format, ...) fprintf(stdout, "[INFO] " format "\n", ##__VA_ARGS__)
+
+#define MAX_MICROTASK_ITERATIONS 1000
+#define SAFE_FREE(ptr) \
+  do                   \
+  {                    \
+    if (ptr)           \
+    {                  \
+      free(ptr);       \
+      ptr = NULL;      \
+    }                  \
+  } while (0)
+#define SAFE_JS_FREEVALUE(ctx, val) \
+  do                                \
+  {                                 \
+    if (!JS_IsUndefined(val))       \
+    {                               \
+      JS_FreeValue(ctx, val);       \
+    }                               \
+  } while (0);
+
+static JSClassID js_worker_context_class_id = 0;
 
 // 定时器结构体，用于跟踪定时器
 typedef struct
@@ -14,27 +38,51 @@ typedef struct
   JSContext *ctx;
   JSValue callback;
   int timer_id;
+  int is_interval;
+  int delay;
 } timer_data_t;
+
+// Forward declarations
+static void execute_microtask_timer(JSContext *ctx);
+static void close_timer_callback(uv_handle_t *handle);
+static WorkerContext *get_worker_context(JSContext *ctx);
+static void init_timer_table(WorkerRuntime *wrt);
+static void cleanup_timer_table(WorkerRuntime *wrt);
+static void add_timer_to_table(WorkerRuntime *wrt, int timer_id, uv_timer_t *timer);
+static uv_timer_t *find_timer_by_id(WorkerRuntime *wrt, int timer_id);
+static void remove_timer_from_table(WorkerRuntime *wrt, int timer_id);
+static void close_all_handles_walk_cb(uv_handle_t *handle, void *arg);
+static void count_handles_walk_cb(uv_handle_t *handle, void *arg);
 
 WorkerRuntime *Worker_NewRuntime(int max_context)
 {
-  WorkerRuntime *wrt = malloc(sizeof(WorkerRuntime));
-  if (!wrt)
+  if (max_context <= 0)
   {
+    LOG_ERROR("Invalid max_context value: %d", max_context);
     return NULL;
   }
+
+  WorkerRuntime *wrt = calloc(1, sizeof(WorkerRuntime));
+  if (!wrt)
+  {
+    LOG_ERROR("Failed to allocate memory for WorkerRuntime");
+    return NULL;
+  }
+
   JSRuntime *rt = JS_NewRuntime();
   if (!rt)
   {
-    free(wrt);
+    LOG_ERROR("Failed to create JS runtime");
+    SAFE_FREE(wrt);
     return NULL;
   }
 
   uv_loop_t *loop = uv_loop_new();
   if (!loop)
   {
+    LOG_ERROR("Failed to allocate memory for event loop");
     JS_FreeRuntime(rt);
-    free(wrt);
+    SAFE_FREE(wrt);
     return NULL;
   }
 
@@ -48,45 +96,94 @@ WorkerRuntime *Worker_NewRuntime(int max_context)
   // 初始化微任务定时器
   uv_timer_init(loop, &wrt->microtask_timer);
 
+  // Initialize the timer table for faster lookups
+  init_timer_table(wrt);
+
   uv_run(wrt->loop, UV_RUN_NOWAIT);
+
+  // Register class ID for worker context if not already done
+  if (js_worker_context_class_id == 0)
+  {
+    JS_NewClassID(&js_worker_context_class_id);
+  }
 
   return wrt;
 }
 
 void Worker_FreeRuntime(WorkerRuntime *wrt)
 {
+  if (!wrt)
+    return;
+
+  // Stop the microtask timer
   uv_timer_stop(&wrt->microtask_timer);
+
+  // Close all active handles in the loop
+  uv_close((uv_handle_t *)&wrt->microtask_timer, NULL);
+
+  // 强制关闭所有活跃的句柄
+  uv_walk(wrt->loop, close_all_handles_walk_cb, NULL);
+
+  // 运行事件循环以处理关闭回调
+  while (uv_run(wrt->loop, UV_RUN_NOWAIT) > 0)
+    ;
+
+  // Clean up resources
+  cleanup_timer_table(wrt);
   uv_mutex_destroy(&wrt->context_mutex);
-  uv_loop_close(wrt->loop);
+
+  // 在释放 JS 运行时之前，确保所有 JS 对象都被释放
+  JS_RunGC(wrt->js_runtime);
+
+  int result = uv_loop_close(wrt->loop);
+  if (result != 0)
+  {
+    LOG_WARNING("Failed to close event loop: %s", uv_strerror(result));
+    // 如果仍然失败，尝试获取活跃句柄数量并记录
+    int handle_count = 0;
+    uv_walk(wrt->loop, count_handles_walk_cb, &handle_count);
+    LOG_WARNING("There are still %d active handles", handle_count);
+  }
+
   JS_FreeRuntime(wrt->js_runtime);
-  free(wrt);
+  SAFE_FREE(wrt->loop);
+  SAFE_FREE(wrt);
 }
 
 void Worker_FreeContext(WorkerContext *wctx)
 {
-  JS_FreeContext(wctx->js_context);
+  if (!wctx)
+  {
+    return;
+  }
   uv_mutex_lock(&wctx->runtime->context_mutex);
   wctx->runtime->context_count--;
   uv_mutex_unlock(&wctx->runtime->context_mutex);
-  free(wctx);
+  JS_FreeContext(wctx->js_context);
+  SAFE_FREE(wctx);
 }
 
 static WorkerContext *get_worker_context(JSContext *ctx)
 {
+  if (!ctx)
+  {
+    LOG_ERROR("NULL context passed to get_worker_context");
+    return NULL;
+  }
   JSValue global_obj = JS_GetGlobalObject(ctx);
   JSValue js_wctx = JS_GetPropertyStr(ctx, global_obj, "__worker_context__");
   if (JS_IsException(js_wctx) || JS_IsUndefined(js_wctx))
   {
-    fprintf(stderr, "Failed to get __worker_context__ property\n");
-    JS_FreeValue(ctx, global_obj);
+    LOG_ERROR("Failed to get __worker_context__ property");
+    SAFE_JS_FREEVALUE(ctx, global_obj);
     return NULL;
   }
   WorkerContext *wctx = JS_GetOpaque(js_wctx, js_worker_context_class_id);
-  JS_FreeValue(ctx, js_wctx);
-  JS_FreeValue(ctx, global_obj);
+  SAFE_JS_FREEVALUE(ctx, js_wctx);
+  SAFE_JS_FREEVALUE(ctx, global_obj);
   if (!wctx)
   {
-    fprintf(stderr, "Failed to get opaque wrt\n");
+    LOG_ERROR("Failed to get opaque worker context");
     return NULL;
   }
 
@@ -96,27 +193,37 @@ static WorkerContext *get_worker_context(JSContext *ctx)
 // 执行 QuickJS 的微任务队列
 void execute_microtask_timer(JSContext *ctx)
 {
+  if (!ctx)
+  {
+    LOG_ERROR("NULL context passed to execute_microtask_timer");
+    return;
+  }
   JSContext *current_ctx = ctx; // 保存原始上下文引用
   JSRuntime *rt = JS_GetRuntime(ctx);
+  if (!rt)
+  {
+    LOG_ERROR("Failed to get JS runtime");
+    return;
+  }
 
   // 执行所有待处理的任务，但限制最大执行次数以避免无限循环
   int hasPending;
-  int max_iterations = 1000; // 设置一个合理的上限
   int count = 0;
   do
   {
     hasPending = JS_ExecutePendingJob(rt, &ctx);
     count++;
-  } while (hasPending > 0 && count < max_iterations);
+  } while (hasPending > 0 && count < MAX_MICROTASK_ITERATIONS);
 
-  if (count >= max_iterations && hasPending > 0)
+  if (count >= MAX_MICROTASK_ITERATIONS && hasPending > 0)
   {
-    fprintf(stderr, "Warning: Reached maximum microtask iterations\n");
+    LOG_WARNING("Reached maximum microtask iterations (%d)", MAX_MICROTASK_ITERATIONS);
   }
 
   WorkerContext *wctx = get_worker_context(current_ctx);
+
   // 检查是否可以释放上下文
-  if (wctx && wctx->active_timers == 0)
+  if (wctx && wctx->active_timers == 0 && wctx->pending_free)
   {
     Worker_FreeContext(wctx);
   }
@@ -125,19 +232,38 @@ void execute_microtask_timer(JSContext *ctx)
 // 释放定时器资源
 void close_timer_callback(uv_handle_t *handle)
 {
+  if (!handle || !handle->data)
+  {
+    LOG_ERROR("Invalid handle in close_timer_callback");
+    return;
+  }
+
   timer_data_t *timer_data = (timer_data_t *)handle->data;
   WorkerContext *wctx = timer_data->wctx;
   JSContext *ctx = timer_data->ctx;
 
+  if (!wctx || !ctx)
+  {
+    LOG_ERROR("Invalid worker context or JS context in timer data");
+    SAFE_FREE(timer_data);
+    return;
+  }
+
+  // Remove the timer from the lookup table
+  remove_timer_from_table(wctx->runtime, timer_data->timer_id);
+
   // 释放JS回调函数
-  JS_FreeValue(ctx, timer_data->callback);
-  free(timer_data);
+  SAFE_JS_FREEVALUE(ctx, timer_data->callback);
+  SAFE_FREE(timer_data);
+
   // 减少活跃定时器计数
   wctx->active_timers--;
 
-  // 如果这是最后一个定时器，执行微任务并可能释放上下文
+  // 判断是否是最后一个定时器关闭
   if (wctx->active_timers == 0)
   {
+    // 当没有定时器时，将上下文标记为可释放
+    wctx->pending_free = 1;
     execute_microtask_timer(ctx);
   }
 }
@@ -145,37 +271,67 @@ void close_timer_callback(uv_handle_t *handle)
 // 定时器回调函数
 void timer_callback(uv_timer_t *handle)
 {
+  if (!handle || !handle->data)
+  {
+    LOG_ERROR("Invalid handle in timer_callback");
+    return;
+  }
+
   timer_data_t *timer_data = (timer_data_t *)handle->data;
   JSContext *ctx = timer_data->ctx;
-  JSValue ret;
+  WorkerContext *wctx = timer_data->wctx;
+
+  if (!ctx || !wctx)
+  {
+    LOG_ERROR("Invalid JS context or worker context in timer data");
+    uv_timer_stop(handle);
+    uv_close((uv_handle_t *)handle, NULL);
+    return;
+  }
 
   // 调用JS回调函数
-  ret = JS_Call(ctx, timer_data->callback, JS_UNDEFINED, 0, NULL);
+  JSValue ret = JS_Call(ctx, timer_data->callback, JS_UNDEFINED, 0, NULL);
   if (JS_IsException(ret))
   {
     JSValue exception = JS_GetException(ctx);
     const char *str = JS_ToCString(ctx, exception);
-    printf("Timer callback exception: %s\n", str);
-    JS_FreeCString(ctx, str);
-    JS_FreeValue(ctx, exception);
+    if (str)
+    {
+      LOG_ERROR("Timer callback exception: %s", str);
+      JS_FreeCString(ctx, str);
+    }
+    SAFE_JS_FREEVALUE(ctx, exception);
   }
-  JS_FreeValue(ctx, ret);
+  SAFE_JS_FREEVALUE(ctx, ret);
+
+  if (timer_data->is_interval)
+  {
+    // 对于 interval 定时器，重新启动定时器
+    uv_timer_start(handle, timer_callback, timer_data->delay, 0);
+    return;
+  }
 
   // 停止定时器并释放资源
   uv_timer_stop(handle);
   uv_close((uv_handle_t *)handle, close_timer_callback);
+
+  // 当这是最后一个定时器时，考虑释放上下文
+  if (wctx->active_timers == 1) // 减1后将变为0
+  {
+    wctx->pending_free = 1; // 标记为可释放
+  }
 
   // 启动微任务定时器，处理可能产生的微任务
   execute_microtask_timer(ctx);
 }
 
 // setTimeout 实现
-static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val, int argc,
-                             JSValueConst *argv)
+static JSValue js_set_timer(JSContext *ctx, JSValueConst this_val, int argc,
+                            JSValueConst *argv, int is_interval)
 {
   if (argc < 2 || !JS_IsFunction(ctx, argv[0]))
   {
-    return JS_ThrowTypeError(ctx, "setTimeout requires a function and delay");
+    return JS_ThrowTypeError(ctx, "setTimeout/setInterval requires a function and delay");
   }
 
   int delay = 0;
@@ -183,16 +339,18 @@ static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val, int argc,
   {
     return JS_ThrowTypeError(ctx, "Invalid delay value");
   }
+  if (delay < 0)
+  {
+    delay = 0;
+  }
 
   WorkerContext *wctx = get_worker_context(ctx);
-
   if (!wctx)
   {
     return JS_ThrowInternalError(ctx, "Worker context not found");
   }
-
   // 创建定时器数据
-  timer_data_t *timer_data = malloc(sizeof(timer_data_t));
+  timer_data_t *timer_data = calloc(1, sizeof(timer_data_t));
   if (!timer_data)
   {
     return JS_ThrowOutOfMemory(ctx);
@@ -204,10 +362,22 @@ static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val, int argc,
   timer_data->ctx = ctx;
   timer_data->wctx = wctx;
   timer_data->callback = JS_DupValue(ctx, argv[0]);
+  timer_data->is_interval = is_interval;
+  timer_data->delay = delay;
+
   uv_mutex_lock(&wrt->context_mutex);
+  // Check for timer ID overflow
+  if (wrt->next_timer_id >= INT_MAX)
+  {
+    wrt->next_timer_id = 1; // Reset to 1 if we reach the maximum
+  }
   timer_data->timer_id = wrt->next_timer_id++;
   uv_mutex_unlock(&wrt->context_mutex);
+
   timer_data->timer.data = timer_data;
+
+  // Add to the timer lookup table
+  add_timer_to_table(wrt, timer_data->timer_id, &timer_data->timer);
 
   // 启动定时器
   uv_timer_start(&timer_data->timer, timer_callback, delay, 0);
@@ -216,18 +386,29 @@ static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val, int argc,
   return JS_NewInt32(ctx, timer_data->timer_id);
 }
 
-// Helper function for clearTimeout
-void clear_timeout_walk(uv_handle_t *handle, void *arg)
+// setTimeout 实现
+static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
-  int *id_ptr = (int *)arg;
-  if (handle->type == UV_TIMER && handle->data)
+  return js_set_timer(ctx, this_val, argc, argv, 0);
+}
+
+// setInterval 实现
+static JSValue js_setInterval(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+  return js_set_timer(ctx, this_val, argc, argv, 1);
+}
+
+// Helper function for clearTimeout/clearInterval
+static void clear_timer(WorkerRuntime *wrt, int timer_id)
+{
+  if (!wrt)
+    return;
+
+  uv_timer_t *timer = find_timer_by_id(wrt, timer_id);
+  if (timer && timer->data)
   {
-    timer_data_t *timer_data = (timer_data_t *)handle->data;
-    if (timer_data->timer_id == *id_ptr)
-    {
-      uv_timer_stop(&timer_data->timer);
-      uv_close((uv_handle_t *)&timer_data->timer, close_timer_callback);
-    }
+    uv_timer_stop(timer);
+    uv_close((uv_handle_t *)timer, close_timer_callback);
   }
 }
 
@@ -235,7 +416,6 @@ void clear_timeout_walk(uv_handle_t *handle, void *arg)
 static JSValue js_clearTimeout(JSContext *ctx, JSValueConst this_val, int argc,
                                JSValueConst *argv)
 {
-
   if (argc < 1)
   {
     return JS_UNDEFINED;
@@ -255,15 +435,194 @@ static JSValue js_clearTimeout(JSContext *ctx, JSValueConst this_val, int argc,
   }
 
   WorkerRuntime *wrt = wctx->runtime;
-
-  // 遍历所有活跃的定时器，查找匹配的ID
-  uv_walk(wrt->loop, clear_timeout_walk, &timer_id);
+  clear_timer(wrt, timer_id);
 
   return JS_UNDEFINED;
 }
 
-void js_std_init_timeout(JSContext *ctx)
+// clearInterval 实现 (same as clearTimeout)
+static JSValue js_clearInterval(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
+  return js_clearTimeout(ctx, this_val, argc, argv);
+}
+
+static void init_timer_table(WorkerRuntime *wrt)
+{
+  if (!wrt)
+    return;
+
+  wrt->timer_table = calloc(1, sizeof(timer_table));
+  if (!wrt->timer_table)
+  {
+    LOG_ERROR("Failed to allocate memory for timer table");
+    return;
+  }
+
+  int result = uv_mutex_init(&wrt->timer_table->mutex);
+  if (result != 0)
+  {
+    LOG_ERROR("Failed to initialize timer table mutex: %s", uv_strerror(result));
+    SAFE_FREE(wrt->timer_table);
+    return;
+  }
+}
+
+static void cleanup_timer_table(WorkerRuntime *wrt)
+{
+  if (!wrt || !wrt->timer_table)
+    return;
+
+  uv_mutex_lock(&wrt->timer_table->mutex);
+
+  // Free all entries in the hash table
+  for (int i = 0; i < TIMER_TABLE_SIZE; i++)
+  {
+    timer_entry *entry = wrt->timer_table->entries[i];
+    while (entry)
+    {
+      timer_entry *next = entry->next;
+      SAFE_FREE(entry);
+      entry = next;
+    }
+    wrt->timer_table->entries[i] = NULL;
+  }
+
+  uv_mutex_unlock(&wrt->timer_table->mutex);
+
+  uv_mutex_destroy(&wrt->timer_table->mutex);
+  SAFE_FREE(wrt->timer_table);
+}
+
+static void add_timer_to_table(WorkerRuntime *wrt, int timer_id, uv_timer_t *timer)
+{
+  if (!wrt || !wrt->timer_table || !timer)
+    return;
+
+  uv_mutex_lock(&wrt->timer_table->mutex);
+
+  int bucket = timer_id % TIMER_TABLE_SIZE;
+  timer_entry *new_entry = malloc(sizeof(timer_entry));
+  if (!new_entry)
+  {
+    LOG_ERROR("Failed to allocate memory for timer entry");
+    uv_mutex_unlock(&wrt->timer_table->mutex);
+    return;
+  }
+
+  new_entry->timer_id = timer_id;
+  new_entry->timer = timer;
+  new_entry->next = wrt->timer_table->entries[bucket];
+  wrt->timer_table->entries[bucket] = new_entry;
+
+  uv_mutex_unlock(&wrt->timer_table->mutex);
+}
+
+static uv_timer_t *find_timer_by_id(WorkerRuntime *wrt, int timer_id)
+{
+  if (!wrt || !wrt->timer_table)
+    return NULL;
+
+  uv_mutex_lock(&wrt->timer_table->mutex);
+
+  int bucket = timer_id % TIMER_TABLE_SIZE;
+  timer_entry *entry = wrt->timer_table->entries[bucket];
+
+  while (entry)
+  {
+    if (entry->timer_id == timer_id)
+    {
+      uv_timer_t *timer = entry->timer;
+      uv_mutex_unlock(&wrt->timer_table->mutex);
+      return timer;
+    }
+    entry = entry->next;
+  }
+
+  uv_mutex_unlock(&wrt->timer_table->mutex);
+
+  return NULL;
+}
+
+static void close_all_handles_walk_cb(uv_handle_t *handle, void *arg)
+{
+  if (!uv_is_closing(handle))
+  {
+    // 为不同类型的句柄设置适当的关闭回调
+    if (handle->type == UV_TIMER)
+    {
+      uv_timer_stop((uv_timer_t *)handle);
+    }
+    uv_close(handle, NULL);
+  }
+}
+
+static void count_handles_walk_cb(uv_handle_t *handle, void *arg)
+{
+  int *count = (int *)arg;
+  (*count)++;
+
+  // 输出句柄类型以便调试
+  const char *type;
+  switch (handle->type)
+  {
+  case UV_TIMER:
+    type = "timer";
+    break;
+  case UV_ASYNC:
+    type = "async";
+    break;
+  case UV_TCP:
+    type = "tcp";
+    break;
+  // 添加其他你可能使用的句柄类型
+  default:
+    type = "unknown";
+    break;
+  }
+
+  LOG_WARNING("Active handle: %s at %p", type, (void *)handle);
+}
+
+static void remove_timer_from_table(WorkerRuntime *wrt, int timer_id)
+{
+  if (!wrt || !wrt->timer_table)
+    return;
+
+  uv_mutex_lock(&wrt->timer_table->mutex);
+
+  int bucket = timer_id % TIMER_TABLE_SIZE;
+  timer_entry *entry = wrt->timer_table->entries[bucket];
+  timer_entry *prev = NULL;
+
+  while (entry)
+  {
+    if (entry->timer_id == timer_id)
+    {
+      if (prev)
+      {
+        prev->next = entry->next;
+      }
+      else
+      {
+        wrt->timer_table->entries[bucket] = entry->next;
+      }
+      SAFE_FREE(entry);
+      break;
+    }
+    prev = entry;
+    entry = entry->next;
+  }
+
+  uv_mutex_unlock(&wrt->timer_table->mutex);
+}
+
+void js_std_init_timer(JSContext *ctx)
+{
+  if (!ctx)
+  {
+    LOG_ERROR("NULL context passed to js_std_init_timeout");
+    return;
+  }
   JSValue global_obj = JS_GetGlobalObject(ctx);
 
   JS_SetPropertyStr(ctx, global_obj, "setTimeout",
@@ -272,28 +631,55 @@ void js_std_init_timeout(JSContext *ctx)
   JS_SetPropertyStr(ctx, global_obj, "clearTimeout",
                     JS_NewCFunction(ctx, js_clearTimeout, "clearTimeout", 1));
 
+  JS_SetPropertyStr(ctx, global_obj, "setInterval",
+                    JS_NewCFunction(ctx, js_setInterval, "setInterval", 2));
+
+  JS_SetPropertyStr(ctx, global_obj, "clearInterval",
+                    JS_NewCFunction(ctx, js_clearInterval, "clearInterval", 1));
+
   JS_FreeValue(ctx, global_obj);
 }
 
 WorkerContext *Worker_NewContext(WorkerRuntime *wrt)
 {
+  if (!wrt)
+  {
+    LOG_ERROR("NULL runtime passed to Worker_NewContext");
+    return NULL;
+  }
+
   uv_mutex_lock(&wrt->context_mutex);
+
   if (wrt->context_count >= wrt->max_context)
   {
+    LOG_ERROR("Maximum context count reached (%d)", wrt->max_context);
     uv_mutex_unlock(&wrt->context_mutex);
     return NULL;
   }
 
-  WorkerContext *wctx = malloc(sizeof(WorkerContext));
+  WorkerContext *wctx = calloc(1, sizeof(WorkerContext));
   if (!wctx)
   {
+    LOG_ERROR("Failed to allocate memory for worker context");
+    uv_mutex_unlock(&wrt->context_mutex);
     return NULL;
   }
+
   JSContext *ctx = JS_NewContext(wrt->js_runtime);
+  if (!ctx)
+  {
+    LOG_ERROR("Failed to create new JS context");
+    SAFE_FREE(wctx);
+    uv_mutex_unlock(&wrt->context_mutex);
+    return NULL;
+  }
+
   wrt->context_count++;
   wctx->js_context = ctx;
   wctx->active_timers = 0;
   wctx->runtime = wrt;
+  wctx->pending_free = 0;
+
   uv_mutex_unlock(&wrt->context_mutex);
 
   JSValue global = JS_GetGlobalObject(ctx);
@@ -303,22 +689,27 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt)
   JS_SetPropertyStr(ctx, global, "__worker_context__", js_wctx);
 
   js_std_init_console(ctx);
-  js_std_init_timeout(ctx);
+  js_std_init_timer(ctx);
 
-  JS_FreeValue(ctx, global);
+  SAFE_JS_FREEVALUE(ctx, global);
 
   return wctx;
 }
 
 int Worker_Eval_JS(WorkerRuntime *wrt, char *script)
 {
-  WorkerContext *wctx = Worker_NewContext(wrt);
-  if (!wctx)
+  if (!wrt)
   {
-    fprintf(stderr, "Failed to create new context\n");
+    LOG_ERROR("NULL runtime passed to Worker_Eval_JS");
+    return 1;
+  }
+  if (!script)
+  {
+    LOG_ERROR("NULL script passed to Worker_Eval_JS");
     return 1;
   }
 
+  WorkerContext *wctx = Worker_NewContext(wrt);
   JSContext *ctx = wctx->js_context;
   JSValue result = JS_Eval(ctx, script, strlen(script), "<input>", JS_EVAL_TYPE_MODULE);
   if (JS_IsException(result))
@@ -327,27 +718,54 @@ int Worker_Eval_JS(WorkerRuntime *wrt, char *script)
     const char *str = JS_ToCString(ctx, exc);
     if (str)
     {
-      fprintf(stderr, "Error: %s\n", str);
+      LOG_ERROR("JS Evaluation error: %s", str);
       JS_FreeCString(ctx, str);
     }
-    JS_FreeValue(ctx, exc);
-    JS_FreeValue(ctx, result);
+
+    SAFE_JS_FREEVALUE(ctx, exc);
+    SAFE_JS_FREEVALUE(ctx, result);
+
+    // Mark for deferred cleanup
+    wctx->pending_free = 1;
+
+    // Process any pending tasks
+    execute_microtask_timer(ctx);
+
     return 1;
   }
-  JS_FreeValue(ctx, result);
+  SAFE_JS_FREEVALUE(ctx, result);
 
   // 处理可能产生的异步任务
   execute_microtask_timer(ctx);
+
+  // Only run GC when necessary, not on every evaluation
+  if (wctx->active_timers == 0)
+  {
+    JS_RunGC(wrt->js_runtime);
+    // 脚本执行完毕且没有活跃定时器，可以安全释放
+    Worker_RequestContextFree(wctx);
+  }
 
   return 0;
 }
 
 int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode, size_t bytecode_len)
 {
+  if (!wrt)
+  {
+    LOG_ERROR("NULL runtime passed to Worker_Eval_Bytecode");
+    return 1;
+  }
+  if (!bytecode || bytecode_len == 0)
+  {
+    LOG_ERROR("Invalid bytecode data passed to Worker_Eval_Bytecode");
+    return 1;
+  }
+
   WorkerContext *wctx = Worker_NewContext(wrt);
   if (!wctx)
   {
-    fprintf(stderr, "Failed to create new context\n");
+    LOG_ERROR("Failed to create new context");
     return 1;
   }
 
@@ -361,10 +779,17 @@ int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode, size_t bytecode_
     const char *str = JS_ToCString(ctx, exc);
     if (str)
     {
-      fprintf(stderr, "Error: %s\n", str);
+      LOG_ERROR("Bytecode loading error: %s", str);
       JS_FreeCString(ctx, str);
     }
-    JS_FreeValue(ctx, exc);
+    SAFE_JS_FREEVALUE(ctx, exc);
+
+    // Mark for deferred cleanup
+    wctx->pending_free = 1;
+
+    // Process any pending tasks
+    execute_microtask_timer(ctx);
+
     return 1;
   }
 
@@ -376,28 +801,159 @@ int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode, size_t bytecode_
     const char *str = JS_ToCString(ctx, exc);
     if (str)
     {
-      fprintf(stderr, "Error: %s\n", str);
+      LOG_ERROR("Bytecode execution error: %s", str);
       JS_FreeCString(ctx, str);
     }
-    JS_FreeValue(ctx, exc);
-    JS_FreeValue(ctx, result);
+    SAFE_JS_FREEVALUE(ctx, exc);
+    SAFE_JS_FREEVALUE(ctx, result);
+
+    // Mark for deferred cleanup
+    wctx->pending_free = 1;
+    execute_microtask_timer(ctx);
     return 1;
   }
-  JS_FreeValue(ctx, result);
+
+  SAFE_JS_FREEVALUE(ctx, result);
 
   // 处理可能产生的异步任务
   execute_microtask_timer(ctx);
+
+  // Only run GC when necessary, not on every evaluation
+  if (wctx->active_timers == 0)
+  {
+    JS_RunGC(wrt->js_runtime);
+    // 脚本执行完毕且没有活跃定时器，可以安全释放
+    Worker_RequestContextFree(wctx);
+  }
 
   return 0;
 }
 
 void Worker_RunLoop(WorkerRuntime *wrt)
 {
+  if (!wrt || !wrt->loop)
+  {
+    LOG_ERROR("Invalid runtime or loop in Worker_RunLoop");
+    return;
+  }
   uv_run(wrt->loop, UV_RUN_DEFAULT);
 }
 
 // 允许非阻塞式运行事件循环
 int Worker_RunLoopOnce(WorkerRuntime *wrt)
 {
+  if (!wrt || !wrt->loop)
+  {
+    LOG_ERROR("Invalid runtime or loop in Worker_RunLoopOnce");
+    return -1;
+  }
   return uv_run(wrt->loop, UV_RUN_NOWAIT);
+}
+
+// Request a context to be freed when all timers are done
+void Worker_RequestContextFree(WorkerContext *wctx)
+{
+  if (!wctx)
+    return;
+
+  wctx->pending_free = 1;
+
+  // If there are no active timers, free immediately
+  if (wctx->active_timers == 0)
+  {
+    Worker_FreeContext(wctx);
+  }
+}
+
+// Get runtime statistics
+void Worker_GetStats(WorkerRuntime *wrt, WorkerRuntimeStats *stats)
+{
+  if (!wrt || !stats)
+    return;
+
+  uv_mutex_lock(&wrt->context_mutex);
+
+  stats->active_contexts = wrt->context_count;
+  stats->max_contexts = wrt->max_context;
+
+  int active_timers = 0;
+
+  // Count active timers across all contexts
+  // This would require iterating through all contexts, which we don't have direct access to
+  // For now, we'll just report the timer count from the hash table
+
+  uv_mutex_unlock(&wrt->context_mutex);
+
+  if (wrt->timer_table)
+  {
+    uv_mutex_lock(&wrt->timer_table->mutex);
+
+    for (int i = 0; i < TIMER_TABLE_SIZE; i++)
+    {
+      timer_entry *entry = wrt->timer_table->entries[i];
+      while (entry)
+      {
+        active_timers++;
+        entry = entry->next;
+      }
+    }
+
+    uv_mutex_unlock(&wrt->timer_table->mutex);
+  }
+
+  stats->active_timers = active_timers;
+}
+
+// Cancel all timers for a context
+void Worker_CancelContextTimers(WorkerContext *wctx)
+{
+  if (!wctx || !wctx->runtime || !wctx->runtime->timer_table)
+    return;
+
+  WorkerRuntime *wrt = wctx->runtime;
+
+  // 创建一个临时数组存储要取消的定时器 ID
+  int *timer_ids = malloc(sizeof(int) * wctx->active_timers);
+  if (!timer_ids)
+    return;
+
+  int timer_count = 0;
+
+  uv_mutex_lock(&wrt->timer_table->mutex);
+
+  // 收集此上下文的所有定时器 ID
+  for (int i = 0; i < TIMER_TABLE_SIZE; i++)
+  {
+    timer_entry *entry = wrt->timer_table->entries[i];
+    while (entry)
+    {
+      uv_timer_t *timer = entry->timer;
+      if (timer && timer->data)
+      {
+        timer_data_t *timer_data = (timer_data_t *)timer->data;
+        if (timer_data->wctx == wctx)
+        {
+          timer_ids[timer_count++] = entry->timer_id;
+          if (timer_count >= wctx->active_timers)
+            break;
+        }
+      }
+      entry = entry->next;
+    }
+    if (timer_count >= wctx->active_timers)
+      break;
+  }
+
+  uv_mutex_unlock(&wrt->timer_table->mutex);
+
+  // 取消所有收集到的定时器
+  for (int i = 0; i < timer_count; i++)
+  {
+    clear_timer(wrt, timer_ids[i]);
+  }
+
+  free(timer_ids);
+
+  // 确保上下文知道它没有活跃定时器了
+  wctx->active_timers = 0;
 }
