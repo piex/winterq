@@ -1,13 +1,21 @@
 #ifndef THREADPOOL_H
 #define THREADPOOL_H
 
-#include <uv.h>
-#include "quickjs.h"
+#include <stdbool.h>
+#include <pthread.h>
 
-typedef struct
+#include "runtime.h"
+
+typedef struct Task
 {
   int task_id;
-  const char *js_code;
+  const char *script; // js script
+
+  uint8_t *bytecode;   // 或者 JavaScript 字节码
+  size_t bytecode_len; // 字节码长度
+
+  int is_script; // 标识是脚本还是字节码
+
   double execution_time;
   void (*callback)(void *);
   void *callback_arg;
@@ -16,45 +24,37 @@ typedef struct
 // 任务队列节点
 typedef struct TaskNode
 {
-  Task task;
+  Task *task;
   struct TaskNode *next;
 } TaskNode;
 
 // 任务队列
-typedef struct
+typedef struct TaskQueue
 {
-  TaskNode *head;
-  TaskNode *tail;
-  int size;
-  uv_mutex_t mutex;
-  uv_cond_t not_empty;
+  TaskNode *head;           // 队列头
+  TaskNode *tail;           // 队列尾
+  int size;                 // 队列中任务数量
+  pthread_mutex_t mutex;    // 队列互斥锁
+  pthread_cond_t not_empty; // 队列非空条件变量
 } TaskQueue;
 
 typedef struct
 {
-  int task_id;
-  double execution_time;
-} TaskExecutionTime;
+  pthread_t *threads; // 线程数组
+  int thread_count;   // 线程数
+  bool shutdown;      // 关闭标志
 
-typedef struct
-{
-  uv_thread_t *threads;
-  int thread_count; // 线程数
-  int shutdown;
-  int completed_tasks; // 已执行任务
   int max_tasks;
-  uv_mutex_t completed_mutex;
-  uv_mutex_t shutdown_mutex;
-  uv_async_t task_complete_async;
-  uv_cond_t all_completed;
+  int completed_tasks; // 已执行任务
+
+  pthread_mutex_t pool_mutex; // 线程池互斥锁
 
   TaskQueue queue;
-  TaskExecutionTime *task_execution_times;
 } ThreadPool;
 
 // API declarations
-ThreadPool *init_thread_pool(int thread_count);
-void add_task_to_pool(ThreadPool *pool, const char *filename, void (*callback)(void *), void *callback_arg);
+ThreadPool *init_thread_pool(int thread_count, int max_contexts);
+int add_script_task_to_pool(ThreadPool *pool, const char *filename, void (*callback)(void *), void *callback_arg);
 void shutdown_thread_pool(ThreadPool *pool);
 
 #endif // THREADPOOL_H

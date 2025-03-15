@@ -34,7 +34,7 @@ typedef struct
 
   uv_loop_t *loop;          // uv事件循环
   uv_mutex_t context_mutex; // context 锁
-  int max_context;          // 最多同时执行的 JSContext
+  int max_contexts;         // 最多同时执行的 JSContext
   int context_count;        // 已经初始化的 context 数量
 
   int next_timer_id;
@@ -58,7 +58,7 @@ typedef struct
  * @param max_context 最大允许的上下文数量
  * @return 成功返回 WorkerRuntime 指针，失败返回 NULL
  */
-WorkerRuntime *Worker_NewRuntime(int max_context);
+WorkerRuntime *Worker_NewRuntime(int max_contexts);
 
 /**
  * 释放运行时环境资源
@@ -89,7 +89,7 @@ void Worker_FreeContext(WorkerContext *wctx);
  * @param script JavaScript 代码字符串
  * @return 成功返回 0，失败返回非零值
  */
-int Worker_Eval_JS(WorkerRuntime *wrt, char *script);
+int Worker_Eval_JS(WorkerRuntime *wrt, const char *script);
 
 /**
  * 执行 JavaScript Bytecode

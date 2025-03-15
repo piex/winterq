@@ -1,16 +1,26 @@
-#include <quickjs.h>
-#include <uv.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <stdbool.h>
 
-#include "console.h"
-#include "eventloop.h"
 #include "threadpool.h"
+#include "runtime.h"
+
+// Forward declarations
+static void init_task_queue(TaskQueue *queue);
+static void enqueue_task(TaskQueue *queue, Task *task);
+static void destroy_task_queue(TaskQueue *queue);
+static Task *dequeue_task(TaskQueue *queue);
 
 // 线程数据
-typedef struct
+typedef struct ThreadData
 {
   ThreadPool *pool;
   int thread_id;
-  JSRuntime *runtime;
+  int max_contexts;
+  WorkerRuntime *runtime;
 } ThreadData;
 
 // 初始化任务队列
@@ -19,20 +29,25 @@ static void init_task_queue(TaskQueue *queue)
   queue->head = NULL;
   queue->tail = NULL;
   queue->size = 0;
-  uv_mutex_init(&queue->mutex);
-  uv_cond_init(&queue->not_empty);
+  pthread_mutex_init(&queue->mutex, NULL);
+  pthread_cond_init(&queue->not_empty, NULL);
 }
 
-// 添加任务到队列
-static void enqueue_task(TaskQueue *queue, Task task)
+/**
+ * 向任务队列中添加任务
+ *
+ * @param queue 任务队列
+ * @param task 要添加的任务
+ */
+static void enqueue_task(TaskQueue *queue, Task *task)
 {
-  TaskNode *node = (TaskNode *)malloc(sizeof(TaskNode));
+  TaskNode *node = calloc(1, sizeof(TaskNode));
   node->task = task;
   node->next = NULL;
 
-  uv_mutex_lock(&queue->mutex);
+  pthread_mutex_lock(&queue->mutex);
 
-  if (queue->tail == NULL)
+  if (queue->size == 0)
   {
     queue->head = node;
     queue->tail = node;
@@ -44,19 +59,33 @@ static void enqueue_task(TaskQueue *queue, Task task)
   }
 
   queue->size++;
-  uv_cond_signal(&queue->not_empty);
-  uv_mutex_unlock(&queue->mutex);
+
+  // 通知等待中的线程有新任务
+  pthread_cond_signal(&queue->not_empty);
+  pthread_mutex_unlock(&queue->mutex);
 }
 
-// 销毁任务队列
+/**
+ * 销毁任务队列
+ *
+ * @param queue 要销毁的任务队列
+ */
 static void destroy_task_queue(TaskQueue *queue)
 {
-  uv_mutex_lock(&queue->mutex);
+  pthread_mutex_lock(&queue->mutex);
 
   TaskNode *current = queue->head;
   while (current != NULL)
   {
     TaskNode *next = current->next;
+    if (current->task->is_script && current->task->script != NULL)
+    {
+      free((void *)current->task->script); // 释放脚本字符串
+    }
+    else if (!current->task->is_script && current->task->bytecode != NULL)
+    {
+      free(current->task->bytecode); // 释放字节码
+    }
     free(current);
     current = next;
   }
@@ -65,278 +94,203 @@ static void destroy_task_queue(TaskQueue *queue)
   queue->tail = NULL;
   queue->size = 0;
 
-  uv_mutex_unlock(&queue->mutex);
-  uv_mutex_destroy(&queue->mutex);
-  uv_cond_destroy(&queue->not_empty);
+  pthread_mutex_unlock(&queue->mutex);
+  pthread_mutex_destroy(&queue->mutex);
+  pthread_cond_destroy(&queue->not_empty);
 }
 
-// Function to evaluate a JS Code with QuickJS
-static int eval_js(JSContext *ctx, const char *js_code)
+/**
+ * 从任务队列中获取任务
+ *
+ * @param queue 任务队列
+ * @return 返回任务，如果队列为空则阻塞等待
+ */
+static Task *dequeue_task(TaskQueue *queue)
 {
-  // Evaluate JS code
-  JSValue val =
-      JS_Eval(ctx, js_code, strlen(js_code), js_code, JS_EVAL_TYPE_GLOBAL);
-
-  if (JS_IsException(val))
+  pthread_mutex_lock(&queue->mutex);
+  // 当队列为空时，等待任务到达
+  while (queue->size == 0)
   {
-    if (JS_IsException(JS_GetException(ctx)))
-    {
-      JSValue exc = JS_GetException(ctx);
-      const char *str = JS_ToCString(ctx, exc);
-      if (str)
-      {
-        fprintf(stderr, "Error: %s\n", str);
-        JS_FreeCString(ctx, str);
-      }
-      JS_FreeValue(ctx, exc);
-    }
-    return 1;
+    pthread_cond_wait(&queue->not_empty, &queue->mutex);
   }
-  JS_FreeValue(ctx, val);
 
-  execute_microtask_timer(ctx);
-  return 0;
+  TaskNode *node = queue->head;
+
+  if (queue->size == 1)
+  {
+    queue->head = NULL;
+    queue->tail = NULL;
+  }
+  else
+  {
+    queue->head = queue->head->next;
+  }
+
+  queue->size--;
+
+  pthread_mutex_unlock(&queue->mutex);
+  return node->task;
 }
 
 // 执行任务
-static void execute_task(JSRuntime *runtime, Task *task)
+static void execute_task(WorkerRuntime *runtime, Task *task)
 {
   clock_t start, end;
   start = clock();
 
-  // 为任务创建新的 JSContext
-  JSContext *ctx = JS_NewContext(runtime);
-  if (!ctx)
+  if (task->is_script)
   {
-    fprintf(stderr, "Failed to create JS context for task %d\n", task->task_id);
-    return;
+    // 执行JavaScript脚本
+    Worker_Eval_JS(runtime, task->script);
+    if (task->script != NULL)
+    {
+      free((void *)task->script); // 释放脚本字符串
+    }
   }
-
-  js_std_init_console(ctx);
-  js_std_init_timeout(ctx);
-
-  if (eval_js(ctx, task->js_code) < 0)
-  {
-    fprintf(stderr, "Error executing js in task %d\n", task->task_id);
+  else
+  { // 执行JavaScript字节码
+    Worker_Eval_Bytecode(runtime, task->bytecode, task->bytecode_len);
+    if (task->bytecode != NULL)
+    {
+      free(task->bytecode); // 释放字节码
+    }
   }
-
-  // 清理 JSContext
-  JS_FreeContext(ctx);
-  // JS_RunGC(runtime);
 
   end = clock();
   task->execution_time = ((double)(end - start)) / CLOCKS_PER_SEC;
 }
 
-// 任务完成时的回调函数
-static void on_task_complete(uv_async_t *handle)
-{
-  ThreadData *thread_data = (ThreadData *)handle->data;
-  ThreadPool *pool = thread_data->pool;
-
-  uv_mutex_lock(&pool->completed_mutex);
-  // 检查是否有完成的任务需要处理
-  if (pool->completed_tasks > 0)
-  {
-    // 如果所有任务都完成了，发出信号
-    if (pool->completed_tasks >= pool->max_tasks)
-    {
-      uv_cond_signal(&pool->all_completed);
-    }
-  }
-  uv_mutex_unlock(&pool->completed_mutex);
-}
-
 // 线程工作函数
-static void worker_thread(void *arg)
+static void *worker_thread(void *arg)
 {
+
   ThreadData *thread_data = (ThreadData *)arg;
   ThreadPool *pool = thread_data->pool;
-  int thread_id = thread_data->thread_id;
 
-  // 每个线程创建自己的 JSRuntime
-  JSRuntime *runtime = JS_NewRuntime();
-  if (!runtime)
-  {
-    fprintf(stderr, "Failed to create JS runtime for thread %d\n", thread_id);
-    return;
-  }
+  WorkerRuntime *wrt = Worker_NewRuntime(thread_data->max_contexts);
 
-  thread_data->runtime = runtime;
-
-  printf("Thread %d started with its own JSRuntime\n", thread_id);
+  // 设置定时器，每1ms执行一次 Worker_RunLoopOnce
+  struct timespec sleep_time;
+  sleep_time.tv_sec = 0;
+  sleep_time.tv_nsec = 1000000; // 1毫秒 = 1000000纳秒
 
   // 循环处理任务
   while (1)
   {
-    Task task;
-    int got_task = 0;
+    pthread_mutex_lock(&pool->pool_mutex);
+    bool should_exit = pool->shutdown;
+    pthread_mutex_unlock(&pool->pool_mutex);
+    printf("\n---should_exit-%d--\n", should_exit);
 
-    // 获取任务，使用条件变量等待
-    uv_mutex_lock(&pool->queue.mutex);
-
-    // 检查是否需要关闭线程
-    uv_mutex_lock(&pool->shutdown_mutex);
-    int shutdown = pool->shutdown;
-    uv_mutex_unlock(&pool->shutdown_mutex);
-
-    // 如果没有任务且收到关闭信号，退出循环
-    if (pool->queue.size == 0 && shutdown)
-    {
-      uv_mutex_unlock(&pool->queue.mutex);
+    if (should_exit)
       break;
-    }
 
-    // 如果没有任务，等待任务或关闭信号
-    while (pool->queue.size == 0 && !shutdown)
+    // 尝试获取一个任务
+    Task *task = dequeue_task(&pool->queue);
+
+    // 执行任务
+    if (task != NULL)
     {
-      uv_cond_wait(&pool->queue.not_empty, &pool->queue.mutex);
-
-      // 再次检查关闭信号
-      uv_mutex_lock(&pool->shutdown_mutex);
-      shutdown = pool->shutdown;
-      uv_mutex_unlock(&pool->shutdown_mutex);
+      execute_task(wrt, task);
     }
 
-    // 如果收到关闭信号且没有任务，退出循环
-    if (pool->queue.size == 0 && shutdown)
-    {
-      uv_mutex_unlock(&pool->queue.mutex);
-      break;
-    }
+    // 每1ms运行一次事件循环
+    Worker_RunLoopOnce(wrt);
+    printf("\n-----------------Worker_RunLoopOnce--%d-\n", thread_data->thread_id);
 
-    // 获取任务
-    if (pool->queue.head != NULL)
-    {
-      TaskNode *node = pool->queue.head;
-      task = node->task;
-
-      pool->queue.head = node->next;
-      if (pool->queue.head == NULL)
-      {
-        pool->queue.tail = NULL;
-      }
-
-      pool->queue.size--;
-      free(node);
-      got_task = 1;
-    }
-
-    uv_mutex_unlock(&pool->queue.mutex);
-
-    if (got_task)
-    {
-      // 执行任务
-      execute_task(runtime, &task);
-
-      // 将任务结果存储到主线程的任务数组中
-      uv_mutex_lock(&pool->completed_mutex);
-
-      // 动态扩展任务结果数组
-      if (task.task_id > pool->max_tasks)
-      {
-        int old_max = pool->max_tasks;
-        pool->max_tasks = task.task_id;
-        pool->task_execution_times =
-            realloc(pool->task_execution_times,
-                    pool->max_tasks * sizeof(TaskExecutionTime));
-        // 初始化新分配的内存
-        for (int i = old_max; i < pool->max_tasks; i++)
-        {
-          pool->task_execution_times[i].task_id = 0;
-          pool->task_execution_times[i].execution_time = 0.0;
-        }
-      }
-
-      pool->task_execution_times[task.task_id - 1].task_id = task.task_id;
-      pool->task_execution_times[task.task_id - 1].execution_time =
-          task.execution_time;
-
-      // 通知事件循环有任务完成
-      uv_async_send(&pool->task_complete_async);
-      uv_cond_signal(&pool->all_completed);
-      uv_mutex_unlock(&pool->completed_mutex);
-
-      // 执行回调
-      if (task.callback)
-      {
-        task.callback(&task);
-      }
-    }
+    // 短暂sleep，以便其他线程可以获取任务
+    nanosleep(&sleep_time, NULL);
   }
 
   // 清理 JSRuntime
-  JS_FreeRuntime(runtime);
-  printf("Thread %d shutting down\n", thread_id);
+  Worker_FreeRuntime(wrt);
+  printf("Thread %d shutting down\n", thread_data->thread_id);
+  return NULL;
 }
 
-// 初始化线程池
-ThreadPool *init_thread_pool(int thread_count)
+/**
+ * 初始化线程池
+ *
+ * @param num_threads 线程数量
+ * @param max_contexts 每个运行时的最大上下文数
+ * @return 成功返回0，失败返回非零值
+ */
+ThreadPool *init_thread_pool(int thread_count, int max_contexts)
 {
   ThreadPool *pool = (ThreadPool *)malloc(sizeof(ThreadPool));
-  if (!pool)
+  if (pool == NULL)
   {
-    fprintf(stderr, "Failed to allocate memory for thread pool\n");
     return NULL;
   }
 
   pool->thread_count = thread_count;
-  pool->threads = (uv_thread_t *)malloc(thread_count * sizeof(uv_thread_t));
-  pool->shutdown = 0;
-  pool->max_tasks = 0;
-  pool->task_execution_times = NULL;
+  pool->shutdown = false;
 
-  uv_mutex_init(&pool->shutdown_mutex);
-  uv_mutex_init(&pool->completed_mutex);
-  uv_cond_init(&pool->all_completed);
-
+  // 初始化任务队列
   init_task_queue(&pool->queue);
 
   // 创建线程数据
   ThreadData *thread_data =
       (ThreadData *)malloc(thread_count * sizeof(ThreadData));
+  // 初始化互斥锁
+  pthread_mutex_init(&pool->pool_mutex, NULL);
+
+  pool->threads = (pthread_t *)malloc(sizeof(pthread_t) * thread_count);
 
   // 创建工作线程
   for (int i = 0; i < thread_count; i++)
   {
     thread_data[i].pool = pool;
     thread_data[i].thread_id = i;
+    thread_data[i].max_contexts = max_contexts;
     thread_data[i].runtime = NULL;
-
-    if (uv_thread_create(&pool->threads[i], worker_thread, &thread_data[i]) !=
-        0)
+    if (pthread_create(&pool->threads[i], NULL, worker_thread, thread_data) != 0)
     {
-      fprintf(stderr, "Failed to create thread %d\n", i);
-      // 清理已创建的线程
-      for (int j = 0; j < i; j++)
-      {
-        uv_thread_join(&pool->threads[j]);
-      }
-
-      free(pool->threads);
       free(thread_data);
-      free(pool);
       return NULL;
     }
   }
 
-  pool->task_complete_async.data = thread_data;
-
   return pool;
 }
 
-// 添加任务到线程池
-void add_task_to_pool(ThreadPool *pool, const char *js_code,
-                      void (*callback)(void *), void *callback_arg)
+/**
+ * 提交JavaScript脚本任务到线程池
+ *
+ * @param script JavaScript脚本代码
+ * @return 成功返回0，失败返回非零值
+ */
+int add_script_task_to_pool(ThreadPool *pool, const char *script,
+                            void (*callback)(void *), void *callback_arg)
 {
   static int task_id = 1;
-  Task task;
-  task.js_code = js_code;
-  task.execution_time = 0.0;
-  task.task_id = task_id++;
-  task.callback = callback;
-  task.callback_arg = callback_arg;
+
+  // 创建新任务
+  Task *task = (Task *)malloc(sizeof(Task));
+  if (task == NULL)
+  {
+    return -1;
+  }
+
+  // 复制脚本字符串
+  char *script_copy = strdup(script);
+  if (script_copy == NULL)
+  {
+    free(task);
+    return -1;
+  }
+
+  task->is_script = true;
+  task->script = script_copy;
+  task->bytecode = NULL;
+  task->bytecode_len = 0;
+  task->execution_time = 0.0;
+  task->task_id = task_id++;
+  task->callback = callback;
+  task->callback_arg = callback_arg;
   enqueue_task(&pool->queue, task);
+
+  return 0;
 }
 
 // 关闭线程池
@@ -346,28 +300,26 @@ void shutdown_thread_pool(ThreadPool *pool)
     return;
 
   // 设置关闭标志
-  uv_mutex_lock(&pool->shutdown_mutex);
-  pool->shutdown = 1;
-  uv_mutex_unlock(&pool->shutdown_mutex);
-
-  // 唤醒所有等待任务的线程
-  uv_mutex_lock(&pool->queue.mutex);
-  uv_cond_broadcast(&pool->queue.not_empty);
-  uv_mutex_unlock(&pool->queue.mutex);
+  pthread_mutex_lock(&pool->pool_mutex);
+  pool->shutdown = true;
+  pthread_mutex_unlock(&pool->pool_mutex);
 
   // 等待所有线程结束
   for (int i = 0; i < pool->thread_count; i++)
   {
-    uv_thread_join(&pool->threads[i]);
+    pthread_cond_signal(&pool->queue.not_empty);
   }
 
-  // 清理资源
-  destroy_task_queue(&pool->queue);
-  uv_mutex_destroy(&pool->shutdown_mutex);
-  uv_mutex_destroy(&pool->completed_mutex);
-  uv_cond_destroy(&pool->all_completed);
+  // 等待所有线程退出
+  for (int i = 0; i < pool->thread_count; i++)
+  {
+    pthread_join(pool->threads[i], NULL);
+  }
 
-  free(pool->task_execution_times);
+  // 释放资源
   free(pool->threads);
+  destroy_task_queue(&pool->queue);
+  pthread_mutex_destroy(&pool->pool_mutex);
+
   free(pool);
 }

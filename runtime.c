@@ -10,23 +10,11 @@
 #define LOG_INFO(format, ...) fprintf(stdout, "[INFO] " format "\n", ##__VA_ARGS__)
 
 #define MAX_MICROTASK_ITERATIONS 1000
-#define SAFE_FREE(ptr) \
-  do                   \
-  {                    \
-    if (ptr)           \
-    {                  \
-      free(ptr);       \
-      ptr = NULL;      \
-    }                  \
-  } while (0)
-#define SAFE_JS_FREEVALUE(ctx, val) \
-  do                                \
-  {                                 \
-    if (!JS_IsUndefined(val))       \
-    {                               \
-      JS_FreeValue(ctx, val);       \
-    }                               \
-  } while (0);
+
+// clang-format off
+#define SAFE_FREE(ptr) do { if (ptr) { free(ptr); ptr = NULL; } } while (0)
+#define SAFE_JS_FREEVALUE(ctx, val) do { if (!JS_IsUndefined(val)) { JS_FreeValue(ctx, val); } } while (0)
+// clang-format on
 
 static JSClassID js_worker_context_class_id = 0;
 
@@ -54,11 +42,11 @@ static void remove_timer_from_table(WorkerRuntime *wrt, int timer_id);
 static void close_all_handles_walk_cb(uv_handle_t *handle, void *arg);
 static void count_handles_walk_cb(uv_handle_t *handle, void *arg);
 
-WorkerRuntime *Worker_NewRuntime(int max_context)
+WorkerRuntime *Worker_NewRuntime(int max_contexts)
 {
-  if (max_context <= 0)
+  if (max_contexts <= 0)
   {
-    LOG_ERROR("Invalid max_context value: %d", max_context);
+    LOG_ERROR("Invalid max_context value: %d", max_contexts);
     return NULL;
   }
 
@@ -88,7 +76,7 @@ WorkerRuntime *Worker_NewRuntime(int max_context)
 
   wrt->js_runtime = rt;
   wrt->loop = loop;
-  wrt->max_context = max_context;
+  wrt->max_contexts = max_contexts;
   wrt->context_count = 0;
   wrt->next_timer_id = 1;
 
@@ -650,9 +638,9 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt)
 
   uv_mutex_lock(&wrt->context_mutex);
 
-  if (wrt->context_count >= wrt->max_context)
+  if (wrt->context_count >= wrt->max_contexts)
   {
-    LOG_ERROR("Maximum context count reached (%d)", wrt->max_context);
+    LOG_ERROR("Maximum context count reached (%d)", wrt->max_contexts);
     uv_mutex_unlock(&wrt->context_mutex);
     return NULL;
   }
@@ -696,7 +684,7 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt)
   return wctx;
 }
 
-int Worker_Eval_JS(WorkerRuntime *wrt, char *script)
+int Worker_Eval_JS(WorkerRuntime *wrt, const char *script)
 {
   if (!wrt)
   {
@@ -874,7 +862,7 @@ void Worker_GetStats(WorkerRuntime *wrt, WorkerRuntimeStats *stats)
   uv_mutex_lock(&wrt->context_mutex);
 
   stats->active_contexts = wrt->context_count;
-  stats->max_contexts = wrt->max_context;
+  stats->max_contexts = wrt->max_contexts;
 
   int active_timers = 0;
 
@@ -912,47 +900,50 @@ void Worker_CancelContextTimers(WorkerContext *wctx)
 
   WorkerRuntime *wrt = wctx->runtime;
 
-  // 创建一个临时数组存储要取消的定时器 ID
-  int *timer_ids = malloc(sizeof(int) * wctx->active_timers);
-  if (!timer_ids)
-    return;
-
-  int timer_count = 0;
-
   uv_mutex_lock(&wrt->timer_table->mutex);
 
   // 收集此上下文的所有定时器 ID
   for (int i = 0; i < TIMER_TABLE_SIZE; i++)
   {
-    timer_entry *entry = wrt->timer_table->entries[i];
+    timer_entry **entry_ptr = &wrt->timer_table->entries[i];
+    timer_entry *entry = *entry_ptr;
+
     while (entry)
     {
+      timer_entry *next_entry = entry->next;
       uv_timer_t *timer = entry->timer;
+
       if (timer && timer->data)
       {
         timer_data_t *timer_data = (timer_data_t *)timer->data;
         if (timer_data->wctx == wctx)
         {
-          timer_ids[timer_count++] = entry->timer_id;
-          if (timer_count >= wctx->active_timers)
-            break;
+          // 停止定时器
+          uv_timer_stop(timer);
+          uv_close((uv_handle_t *)timer, close_timer_callback);
+
+          // 从链表中移除此项
+          *entry_ptr = next_entry;
+          free(entry);
+        }
+        else
+        {
+          // 只有当当前项保留在链表中时才更新entry_ptr
+          entry_ptr = &entry->next;
         }
       }
-      entry = entry->next;
+      else
+      {
+        // 处理无效定时器数据的情况
+        *entry_ptr = next_entry;
+        free(entry);
+      }
+
+      entry = next_entry;
     }
-    if (timer_count >= wctx->active_timers)
-      break;
   }
 
   uv_mutex_unlock(&wrt->timer_table->mutex);
-
-  // 取消所有收集到的定时器
-  for (int i = 0; i < timer_count; i++)
-  {
-    clear_timer(wrt, timer_ids[i]);
-  }
-
-  free(timer_ids);
 
   // 确保上下文知道它没有活跃定时器了
   wctx->active_timers = 0;
