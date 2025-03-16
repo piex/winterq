@@ -48,6 +48,9 @@ typedef struct
   JSContext *js_context;
   WorkerRuntime *runtime;
 
+  void (*callback)(void *);
+  void *callback_arg;
+
   int active_timers;
   int pending_free;
 } WorkerContext;
@@ -87,9 +90,11 @@ void Worker_FreeContext(WorkerContext *wctx);
  *
  * @param wrt 运行时环境
  * @param script JavaScript 代码字符串
+ * @param callback 执行完成后的回调函数
+ * @param callback_arg 回调函数的参数
  * @return 成功返回 0，失败返回非零值
  */
-int Worker_Eval_JS(WorkerRuntime *wrt, const char *script);
+int Worker_Eval_JS(WorkerRuntime *wrt, const char *script, void (*callback)(void *), void *callback_arg);
 
 /**
  * 执行 JavaScript Bytecode
@@ -97,9 +102,11 @@ int Worker_Eval_JS(WorkerRuntime *wrt, const char *script);
  * @param wrt 运行时环境
  * @param bytecode JavaScript Bytecode
  * @param bytecode_len JavaScript Bytecode length
+ * @param callback 执行完成后的回调函数
+ * @param callback_arg 回调函数的参数
  * @return 成功返回 0，失败返回非零值
  */
-int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode, size_t bytecode_len);
+int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode, size_t bytecode_len, void (*callback)(void *), void *callback_arg);
 
 /**
  * 运行事件循环，阻塞直到所有事件处理完毕

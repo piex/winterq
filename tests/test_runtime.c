@@ -9,6 +9,13 @@
 #include "../console.c"
 #include "./file.c"
 
+void execution_complete(void *arg)
+{
+  char *filename = (char *)arg;
+  fprintf(stderr, "[INFO] Execution of %s completed.\n", filename);
+  free(filename); // 释放拷贝的 filename
+}
+
 int main(int argc, char **argv)
 {
   if (argc < 2)
@@ -30,8 +37,12 @@ int main(int argc, char **argv)
   // 添加任务到队列
   for (int i = 0; i < num_files; i++)
   {
-    char *js_code = read_file_to_string(argv[i + 1]);
-    Worker_Eval_JS(wrt, js_code);
+    const char *filename = argv[i + 1];
+    char *js_code = read_file_to_string(filename);
+
+    char *filename_copy = strdup(filename);
+
+    Worker_Eval_JS(wrt, js_code, execution_complete, filename_copy);
     free(js_code);
   }
 

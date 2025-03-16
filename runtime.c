@@ -137,14 +137,21 @@ void Worker_FreeRuntime(WorkerRuntime *wrt)
 void Worker_FreeContext(WorkerContext *wctx)
 {
   if (!wctx)
-  {
     return;
-  }
+
+  // 保存回调信息，因为我们将在释放 wctx 之前调用它
+  void (*callback)(void *) = wctx->callback;
+  void *callback_arg = wctx->callback_arg;
+
   uv_mutex_lock(&wctx->runtime->context_mutex);
   wctx->runtime->context_count--;
   uv_mutex_unlock(&wctx->runtime->context_mutex);
   JS_FreeContext(wctx->js_context);
   SAFE_FREE(wctx);
+
+  // 如果有回调函数，执行回调
+  if (callback)
+    callback(callback_arg);
 }
 
 static WorkerContext *get_worker_context(JSContext *ctx)
@@ -680,7 +687,7 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt)
   return wctx;
 }
 
-int Worker_Eval_JS(WorkerRuntime *wrt, const char *script)
+int Worker_Eval_JS(WorkerRuntime *wrt, const char *script, void (*callback)(void *), void *callback_arg)
 {
   if (!wrt)
   {
@@ -695,6 +702,11 @@ int Worker_Eval_JS(WorkerRuntime *wrt, const char *script)
 
   WorkerContext *wctx = Worker_NewContext(wrt);
   JSContext *ctx = wctx->js_context;
+
+  // 存储回调函数和参数
+  wctx->callback = callback;
+  wctx->callback_arg = callback_arg;
+
   JSValue result = JS_Eval(ctx, script, strlen(script), "<input>", JS_EVAL_TYPE_MODULE);
   if (JS_IsException(result))
   {
@@ -717,6 +729,7 @@ int Worker_Eval_JS(WorkerRuntime *wrt, const char *script)
 
     return 1;
   }
+
   SAFE_JS_FREEVALUE(ctx, result);
 
   // 处理可能产生的异步任务
@@ -733,7 +746,7 @@ int Worker_Eval_JS(WorkerRuntime *wrt, const char *script)
   return 0;
 }
 
-int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode, size_t bytecode_len)
+int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode, size_t bytecode_len, void (*callback)(void *), void *callback_arg)
 {
   if (!wrt)
   {
@@ -752,6 +765,10 @@ int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode, size_t bytecode_
     WINTERQ_LOG_ERROR("Failed to create new context");
     return 1;
   }
+
+  // 存储回调函数和参数
+  wctx->callback = callback;
+  wctx->callback_arg = callback_arg;
 
   JSContext *ctx = wctx->js_context;
 

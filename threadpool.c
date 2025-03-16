@@ -28,6 +28,7 @@
 
 // Forward declarations
 static void init_task_queue(TaskQueue *queue, size_t max_size);
+static void task_completion_callback(void *arg);
 static int enqueue_task(TaskQueue *queue, Task *task);
 static void destroy_task_queue(TaskQueue *queue);
 static Task *dequeue_task(TaskQueue *queue);
@@ -47,6 +48,47 @@ static uint64_t get_current_time_ms(void)
   struct timeval tv;
   gettimeofday(&tv, NULL);
   return (uint64_t)(tv.tv_sec) * 1000 + (uint64_t)(tv.tv_usec) / 1000;
+}
+
+// 回调包装函数，用于计算执行时间并释放任务
+static void task_completion_callback(void *arg)
+{
+  Task *task = (Task *)arg;
+  if (!task)
+    return;
+
+  // 获取线程池指针（需要在Task结构体中添加）
+  ThreadPool *pool = task->pool;
+  if (!pool)
+  {
+    // 如果没有线程池指针，只释放任务
+    free(task);
+    return;
+  }
+
+  // 计算执行时间
+  clock_t end_time = clock();
+  task->execution_time = ((double)(end_time - task->start_time)) / CLOCKS_PER_SEC;
+
+  WINTERQ_LOG_DEBUG("Task %d executed in %.2f seconds\n",
+                    task->task_id, task->execution_time);
+
+  // 更新完成任务计数
+  atomic_fetch_add(&pool->completed_tasks, 1);
+
+  // 通知等待线程
+  pthread_mutex_lock(&pool->wait_mutex);
+  pthread_cond_signal(&pool->wait_cond);
+  pthread_mutex_unlock(&pool->wait_mutex);
+
+  // 调用原始回调（如果有）
+  if (task->callback)
+  {
+    task->callback(task->callback_arg);
+  }
+
+  // 释放任务
+  free(task);
 }
 
 /**
@@ -306,6 +348,13 @@ static Task *steal_task(ThreadPool *pool, int thief_id)
         task = node->task;
         free(node);
 
+        // 确保任务的pool指针指向正确的线程池
+        // 这在窃取任务时特别重要，以确保回调能正确更新统计信息
+        if (task != NULL)
+        {
+          task->pool = pool;
+        }
+
         WINTERQ_LOG_INFO("Thread %d stole task from thread %d\n", thief_id, victim_id);
       }
 
@@ -331,13 +380,13 @@ static void execute_task(WorkerRuntime *runtime, Task *task)
   if (runtime == NULL || task == NULL)
     return;
 
-  clock_t start_cpu, end_cpu;
-  start_cpu = clock();
+  // 记录开始时间
+  task->start_time = clock();
 
   if (task->is_script)
   {
     // 执行JavaScript脚本
-    Worker_Eval_JS(runtime, task->script);
+    Worker_Eval_JS(runtime, task->script, task_completion_callback, task);
     if (task->script != NULL)
     {
       free((void *)task->script); // 释放脚本字符串
@@ -346,29 +395,19 @@ static void execute_task(WorkerRuntime *runtime, Task *task)
   }
   else
   { // 执行JavaScript字节码
-    Worker_Eval_Bytecode(runtime, task->bytecode, task->bytecode_len);
+    Worker_Eval_Bytecode(runtime, task->bytecode, task->bytecode_len, task_completion_callback, task);
     if (task->bytecode != NULL)
     {
       free(task->bytecode); // 释放字节码
       task->bytecode = NULL;
     }
   }
-  // 记录结束时间
-  end_cpu = clock();
 
-  // 计算执行时间
-  task->execution_time = ((double)(end_cpu - start_cpu)) / CLOCKS_PER_SEC;
+  // 执行一次事件循环，处理可能的定时器和其他异步任务
+  Worker_RunLoopOnce(runtime);
 
-  // Execute callback if exists
-  if (task->callback != NULL)
-  {
-    task->callback(task->callback_arg);
-  }
-
-  free(task);
-
-  WINTERQ_LOG_DEBUG("Task %d executed in %.2f seconds\n",
-                    task->task_id, task->execution_time);
+  WINTERQ_LOG_DEBUG("Task %d executed synchronous successfully.\n",
+                    task->task_id);
 }
 
 // 线程工作函数
@@ -405,13 +444,9 @@ static void *worker_thread(void *arg)
     // 尝试获取任务，优先级：全局队列 > 本地队列 > 工作窃取
     task = dequeue_task(&pool->queue);
     if (task == NULL)
-    {
       task = dequeue_task(&thread_data->local_queue);
-    }
     if (task == NULL && pool->config.enable_work_stealing)
-    {
       task = steal_task(pool, thread_id);
-    }
 
     // 如果获得了任务
     if (task != NULL)
@@ -435,15 +470,6 @@ static void *worker_thread(void *arg)
 
       // 更新统计信息
       atomic_fetch_add(&thread_data->tasks_processed, 1);
-      atomic_fetch_add(&pool->completed_tasks, 1);
-
-      // 释放任务
-      free(task);
-
-      // 通知等待线程
-      pthread_mutex_lock(&pool->wait_mutex);
-      pthread_cond_signal(&pool->wait_cond);
-      pthread_mutex_unlock(&pool->wait_mutex);
     }
     else
     {
@@ -467,11 +493,18 @@ static void *worker_thread(void *arg)
         pthread_mutex_unlock(&pool->idle_mutex);
       }
 
-      // 短暂休眠以避免CPU占用过高
-      struct timespec ts;
-      ts.tv_sec = 0;
-      ts.tv_nsec = 10000000; // 10ms
-      nanosleep(&ts, NULL);
+      // 在空闲时处理事件循环，确保定时器能够执行
+      int has_pending_events = Worker_RunLoopOnce(thread_data->runtime);
+
+      // 只有当没有待处理事件时才休眠
+      if (!has_pending_events)
+      {
+        // 短暂休眠以避免CPU占用过高
+        struct timespec ts;
+        ts.tv_sec = 0;
+        ts.tv_nsec = 10000000; // 10ms
+        nanosleep(&ts, NULL);
+      }
     }
   }
 
@@ -732,6 +765,7 @@ int add_script_task_to_pool(ThreadPool *pool, const char *script,
   task->task_id = atomic_fetch_add(&pool->total_tasks, 1);
   task->callback = callback;
   task->callback_arg = callback_arg;
+  task->pool = pool; // 设置线程池指针
 
   // 尝试添加到全局队列
   if (enqueue_task(&pool->queue, task) != 0)
@@ -783,6 +817,7 @@ int add_bytecode_task_to_pool(ThreadPool *pool, uint8_t *bytecode, size_t byteco
   task->task_id = atomic_fetch_add(&pool->total_tasks, 1);
   task->callback = callback;
   task->callback_arg = callback_arg;
+  task->pool = pool;
 
   // 尝试添加到全局队列
   if (enqueue_task(&pool->queue, task) != 0)

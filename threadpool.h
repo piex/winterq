@@ -18,9 +18,13 @@ typedef struct Task
   uint8_t *bytecode;   // 或者 JavaScript 字节码
   size_t bytecode_len; // 字节码长度
 
-  double execution_time;
+  clock_t start_time;    // 任务开始时间
+  double execution_time; // 任务执行时间
+
   void (*callback)(void *);
   void *callback_arg;
+
+  struct ThreadPool *pool; // 指向线程池的指针
 } Task;
 
 // 任务队列节点
