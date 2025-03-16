@@ -12,8 +12,7 @@
 // 回调函数示例
 void task_callback(void *arg)
 {
-  Task *task = (Task *)arg;
-  printf("Task %d completed in %.6f seconds\n", task->task_id, task->execution_time);
+  printf("A task completed.\n");
 }
 
 int main(int argc, char **argv)
@@ -50,7 +49,8 @@ int main(int argc, char **argv)
       .local_queue_size = 10,
       .enable_work_stealing = true,
       .idle_threshold = 2,
-      .dynamic_sizing = true};
+      .dynamic_sizing = false,
+  };
 
   // 初始化线程池
   ThreadPool *pool = init_thread_pool(config);
@@ -61,7 +61,7 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  printf("Created thread pool successfully.\n");
+  printf("\n-------- Created thread pool successfully --------\n\n\n");
 
   // 添加任务到队列
   for (int i = 0; i < num_files; i++)
@@ -78,9 +78,9 @@ int main(int argc, char **argv)
 
   printf("Added %d tasks to the queue\n", total_tasks);
 
-  // 等待所有任务完成（最多等待30秒）
+  // 等待所有任务完成（最多等待10秒）
   printf("Waiting for tasks to complete...\n");
-  int wait_result = wait_for_idle(pool, 30000);
+  int wait_result = wait_for_idle(pool, 10000);
 
   if (wait_result == 0)
   {
@@ -97,11 +97,13 @@ int main(int argc, char **argv)
 
   // 获取线程池统计信息
   ThreadPoolStats stats = get_thread_pool_stats(pool);
-  printf("Thread pool statistics:\n");
-  printf("  Active threads: %d\n", stats.active_threads);
-  printf("  Idle threads: %d\n", stats.idle_threads);
-  printf("  Completed tasks: %d\n", stats.completed_tasks);
-  printf("  Thread utilization: %.2f%%\n", stats.thread_utilization);
+
+  printf("\n================= Thread Pool Statistics =================\n");
+  printf("| %-20s | %-10d |\n", "Active threads", stats.active_threads);
+  printf("| %-20s | %-10d |\n", "Idle threads", stats.idle_threads);
+  printf("| %-20s | \033[1;32m%-10d\033[0m |\n", "Completed tasks", stats.completed_tasks);
+  printf("| %-20s | \033[1;34m%-9.2f%%\033[0m |\n", "Thread utilization", stats.thread_utilization);
+  printf("===========================================================\n\n");
 
   // 关闭线程池
   shutdown_thread_pool(pool);

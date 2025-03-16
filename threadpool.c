@@ -76,19 +76,23 @@ static void task_completion_callback(void *arg)
   // 更新完成任务计数
   atomic_fetch_add(&pool->completed_tasks, 1);
 
+  // 保存回调信息，因为我们将在释放 wctx 之前调用它
+  void (*callback)(void *) = task->callback;
+  void *callback_arg = task->callback_arg;
+
+  // 释放任务
+  free(task);
+
+  // 调用原始回调（如果有）
+  if (callback)
+  {
+    callback(callback_arg);
+  }
+
   // 通知等待线程
   pthread_mutex_lock(&pool->wait_mutex);
   pthread_cond_signal(&pool->wait_cond);
   pthread_mutex_unlock(&pool->wait_mutex);
-
-  // 调用原始回调（如果有）
-  if (task->callback)
-  {
-    task->callback(task->callback_arg);
-  }
-
-  // 释放任务
-  free(task);
 }
 
 /**
