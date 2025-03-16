@@ -1,4 +1,4 @@
-console.info("==== test1.js ====");
+console.info("---- test1.js ----");
 function assert(b, str) {
 	if (b) {
 		return;
@@ -13,7 +13,7 @@ globalThis.a = 1;
 assert(globalThis.a === 1);
 
 setTimeout(() => {
-	console.log("==== test1.js timeout ====");
+	console.log("---- test1.js timeout ----");
 	globalThis.a = 1.1;
 	assert(globalThis.a === 1.1);
 }, 200);
