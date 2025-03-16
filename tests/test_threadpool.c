@@ -32,9 +32,6 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  clock_t start, end;
-  start = clock();
-
   // JS文件数量
   int num_files = argc - 2;
   // 任务数，总文件数乘以执行次数
@@ -44,8 +41,19 @@ int main(int argc, char **argv)
   int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
 
   printf("Creating thread pool with %d threads\n", num_cores);
+
+  // 创建线程池配置
+  ThreadPoolConfig config = {
+      .thread_count = num_cores,
+      .max_contexts = 10,
+      .global_queue_size = 100,
+      .local_queue_size = 10,
+      .enable_work_stealing = true,
+      .idle_threshold = 2,
+      .dynamic_sizing = true};
+
   // 初始化线程池
-  ThreadPool *pool = init_thread_pool(num_cores, 100);
+  ThreadPool *pool = init_thread_pool(config);
 
   if (!pool)
   {
@@ -53,7 +61,7 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  printf("Created thread pool success.\n");
+  printf("Created thread pool successfully.\n");
 
   // 添加任务到队列
   for (int i = 0; i < num_files; i++)
@@ -64,15 +72,39 @@ int main(int argc, char **argv)
     {
       add_script_task_to_pool(pool, js_code, task_callback, NULL);
     }
+
+    free((void *)js_code);
   }
 
   printf("Added %d tasks to the queue\n", total_tasks);
 
-  sleep(10);
+  // 等待所有任务完成（最多等待30秒）
+  printf("Waiting for tasks to complete...\n");
+  int wait_result = wait_for_idle(pool, 30000);
 
-  // 清理资源
-  end = clock();
-  printf("Total execution time: %.6f seconds.\n", ((double)(end - start)) / CLOCKS_PER_SEC);
+  if (wait_result == 0)
+  {
+    printf("All tasks completed successfully.\n");
+  }
+  else if (wait_result == 1)
+  {
+    printf("Timeout waiting for tasks to complete.\n");
+  }
+  else
+  {
+    printf("Error waiting for tasks to complete.\n");
+  }
+
+  // 获取线程池统计信息
+  ThreadPoolStats stats = get_thread_pool_stats(pool);
+  printf("Thread pool statistics:\n");
+  printf("  Active threads: %d\n", stats.active_threads);
+  printf("  Idle threads: %d\n", stats.idle_threads);
+  printf("  Completed tasks: %d\n", stats.completed_tasks);
+  printf("  Thread utilization: %.2f%%\n", stats.thread_utilization);
+
+  // 关闭线程池
+  shutdown_thread_pool(pool);
 
   return 0;
 }

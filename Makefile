@@ -7,6 +7,7 @@ LIBUV_PATH = $(PWD)/deps/uv
 
 CFLAGS = -I$(QUICKJS_PATH) -I$(LIBUV_PATH)/include -Wall -O2
 LDFLAGS = $(QUICKJS_PATH)/libquickjs.a $(LIBUV_PATH)/.libs/libuv.a 
+TEST_LOG_FLAGS = -DWINTERQ_LOG_LEVEL=4
 
 # target
 TARGET = winterq
@@ -29,7 +30,7 @@ clean:
 	cd ${LIBUV_PATH} && make clean
 
 test_runtime:
-	$(CC) $(CFLAGS) -o test_runtime ./tests/test_runtime.c $(LDFLAGS) &&  \
+	$(CC) $(CFLAGS) -o test_runtime ./tests/test_runtime.c $(LDFLAGS) ${TEST_LOG_FLAGS} &&  \
 	./test_runtime \
 		./tests/test1.js \
 		./tests/test2.js \
@@ -40,7 +41,7 @@ test_runtime:
 	rm -rf ./test_runtime
 
 test_threadpool:
-	$(CC) $(CFLAGS) -o test_threadpool ./tests/test_threadpool.c $(LDFLAGS) &&  \
+	$(CC) $(CFLAGS) -o test_threadpool ./tests/test_threadpool.c $(LDFLAGS) ${TEST_LOG_FLAGS} &&  \
 	./test_threadpool \
 		./tests/test1.js \
 		./tests/test2.js \

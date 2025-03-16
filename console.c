@@ -1,5 +1,6 @@
-#include <quickjs.h>
 #include <stdio.h>
+
+#include <quickjs.h>
 
 #include "console.h"
 

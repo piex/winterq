@@ -1,13 +1,9 @@
 #include <uv.h>
 #include <quickjs.h>
 
+#include "log.h"
 #include "runtime.h"
 #include "console.h"
-
-// Global logging function to replace direct fprintf calls
-#define LOG_ERROR(format, ...) fprintf(stderr, "[ERROR] " format "\n", ##__VA_ARGS__)
-#define LOG_WARNING(format, ...) fprintf(stderr, "[WARNING] " format "\n", ##__VA_ARGS__)
-#define LOG_INFO(format, ...) fprintf(stdout, "[INFO] " format "\n", ##__VA_ARGS__)
 
 #define MAX_MICROTASK_ITERATIONS 1000
 
@@ -46,21 +42,21 @@ WorkerRuntime *Worker_NewRuntime(int max_contexts)
 {
   if (max_contexts <= 0)
   {
-    LOG_ERROR("Invalid max_context value: %d", max_contexts);
+    WINTERQ_LOG_ERROR("Invalid max_context value: %d", max_contexts);
     return NULL;
   }
 
   WorkerRuntime *wrt = calloc(1, sizeof(WorkerRuntime));
   if (!wrt)
   {
-    LOG_ERROR("Failed to allocate memory for WorkerRuntime");
+    WINTERQ_LOG_ERROR("Failed to allocate memory for WorkerRuntime");
     return NULL;
   }
 
   JSRuntime *rt = JS_NewRuntime();
   if (!rt)
   {
-    LOG_ERROR("Failed to create JS runtime");
+    WINTERQ_LOG_ERROR("Failed to create JS runtime");
     SAFE_FREE(wrt);
     return NULL;
   }
@@ -68,7 +64,7 @@ WorkerRuntime *Worker_NewRuntime(int max_contexts)
   uv_loop_t *loop = uv_loop_new();
   if (!loop)
   {
-    LOG_ERROR("Failed to allocate memory for event loop");
+    WINTERQ_LOG_ERROR("Failed to allocate memory for event loop");
     JS_FreeRuntime(rt);
     SAFE_FREE(wrt);
     return NULL;
@@ -126,11 +122,11 @@ void Worker_FreeRuntime(WorkerRuntime *wrt)
   int result = uv_loop_close(wrt->loop);
   if (result != 0)
   {
-    LOG_WARNING("Failed to close event loop: %s", uv_strerror(result));
+    WINTERQ_LOG_WARNING("Failed to close event loop: %s", uv_strerror(result));
     // 如果仍然失败，尝试获取活跃句柄数量并记录
     int handle_count = 0;
     uv_walk(wrt->loop, count_handles_walk_cb, &handle_count);
-    LOG_WARNING("There are still %d active handles", handle_count);
+    WINTERQ_LOG_WARNING("There are still %d active handles", handle_count);
   }
 
   JS_FreeRuntime(wrt->js_runtime);
@@ -155,14 +151,14 @@ static WorkerContext *get_worker_context(JSContext *ctx)
 {
   if (!ctx)
   {
-    LOG_ERROR("NULL context passed to get_worker_context");
+    WINTERQ_LOG_ERROR("NULL context passed to get_worker_context");
     return NULL;
   }
   JSValue global_obj = JS_GetGlobalObject(ctx);
   JSValue js_wctx = JS_GetPropertyStr(ctx, global_obj, "__worker_context__");
   if (JS_IsException(js_wctx) || JS_IsUndefined(js_wctx))
   {
-    LOG_ERROR("Failed to get __worker_context__ property");
+    WINTERQ_LOG_ERROR("Failed to get __worker_context__ property");
     SAFE_JS_FREEVALUE(ctx, global_obj);
     return NULL;
   }
@@ -171,7 +167,7 @@ static WorkerContext *get_worker_context(JSContext *ctx)
   SAFE_JS_FREEVALUE(ctx, global_obj);
   if (!wctx)
   {
-    LOG_ERROR("Failed to get opaque worker context");
+    WINTERQ_LOG_ERROR("Failed to get opaque worker context");
     return NULL;
   }
 
@@ -183,14 +179,14 @@ void execute_microtask_timer(JSContext *ctx)
 {
   if (!ctx)
   {
-    LOG_ERROR("NULL context passed to execute_microtask_timer");
+    WINTERQ_LOG_ERROR("NULL context passed to execute_microtask_timer");
     return;
   }
   JSContext *current_ctx = ctx; // 保存原始上下文引用
   JSRuntime *rt = JS_GetRuntime(ctx);
   if (!rt)
   {
-    LOG_ERROR("Failed to get JS runtime");
+    WINTERQ_LOG_ERROR("Failed to get JS runtime");
     return;
   }
 
@@ -205,7 +201,7 @@ void execute_microtask_timer(JSContext *ctx)
 
   if (count >= MAX_MICROTASK_ITERATIONS && hasPending > 0)
   {
-    LOG_WARNING("Reached maximum microtask iterations (%d)", MAX_MICROTASK_ITERATIONS);
+    WINTERQ_LOG_WARNING("Reached maximum microtask iterations (%d)", MAX_MICROTASK_ITERATIONS);
   }
 
   WorkerContext *wctx = get_worker_context(current_ctx);
@@ -222,7 +218,7 @@ void close_timer_callback(uv_handle_t *handle)
 {
   if (!handle || !handle->data)
   {
-    LOG_ERROR("Invalid handle in close_timer_callback");
+    WINTERQ_LOG_ERROR("Invalid handle in close_timer_callback");
     return;
   }
 
@@ -232,7 +228,7 @@ void close_timer_callback(uv_handle_t *handle)
 
   if (!wctx || !ctx)
   {
-    LOG_ERROR("Invalid worker context or JS context in timer data");
+    WINTERQ_LOG_ERROR("Invalid worker context or JS context in timer data");
     SAFE_FREE(timer_data);
     return;
   }
@@ -261,7 +257,7 @@ void timer_callback(uv_timer_t *handle)
 {
   if (!handle || !handle->data)
   {
-    LOG_ERROR("Invalid handle in timer_callback");
+    WINTERQ_LOG_ERROR("Invalid handle in timer_callback");
     return;
   }
 
@@ -271,7 +267,7 @@ void timer_callback(uv_timer_t *handle)
 
   if (!ctx || !wctx)
   {
-    LOG_ERROR("Invalid JS context or worker context in timer data");
+    WINTERQ_LOG_ERROR("Invalid JS context or worker context in timer data");
     uv_timer_stop(handle);
     uv_close((uv_handle_t *)handle, NULL);
     return;
@@ -285,7 +281,7 @@ void timer_callback(uv_timer_t *handle)
     const char *str = JS_ToCString(ctx, exception);
     if (str)
     {
-      LOG_ERROR("Timer callback exception: %s", str);
+      WINTERQ_LOG_ERROR("Timer callback exception: %s", str);
       JS_FreeCString(ctx, str);
     }
     SAFE_JS_FREEVALUE(ctx, exception);
@@ -442,14 +438,14 @@ static void init_timer_table(WorkerRuntime *wrt)
   wrt->timer_table = calloc(1, sizeof(timer_table));
   if (!wrt->timer_table)
   {
-    LOG_ERROR("Failed to allocate memory for timer table");
+    WINTERQ_LOG_ERROR("Failed to allocate memory for timer table");
     return;
   }
 
   int result = uv_mutex_init(&wrt->timer_table->mutex);
   if (result != 0)
   {
-    LOG_ERROR("Failed to initialize timer table mutex: %s", uv_strerror(result));
+    WINTERQ_LOG_ERROR("Failed to initialize timer table mutex: %s", uv_strerror(result));
     SAFE_FREE(wrt->timer_table);
     return;
   }
@@ -492,7 +488,7 @@ static void add_timer_to_table(WorkerRuntime *wrt, int timer_id, uv_timer_t *tim
   timer_entry *new_entry = malloc(sizeof(timer_entry));
   if (!new_entry)
   {
-    LOG_ERROR("Failed to allocate memory for timer entry");
+    WINTERQ_LOG_ERROR("Failed to allocate memory for timer entry");
     uv_mutex_unlock(&wrt->timer_table->mutex);
     return;
   }
@@ -568,7 +564,7 @@ static void count_handles_walk_cb(uv_handle_t *handle, void *arg)
     break;
   }
 
-  LOG_WARNING("Active handle: %s at %p", type, (void *)handle);
+  WINTERQ_LOG_WARNING("Active handle: %s at %p", type, (void *)handle);
 }
 
 static void remove_timer_from_table(WorkerRuntime *wrt, int timer_id)
@@ -608,7 +604,7 @@ void js_std_init_timer(JSContext *ctx)
 {
   if (!ctx)
   {
-    LOG_ERROR("NULL context passed to js_std_init_timeout");
+    WINTERQ_LOG_ERROR("NULL context passed to js_std_init_timeout");
     return;
   }
   JSValue global_obj = JS_GetGlobalObject(ctx);
@@ -632,7 +628,7 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt)
 {
   if (!wrt)
   {
-    LOG_ERROR("NULL runtime passed to Worker_NewContext");
+    WINTERQ_LOG_ERROR("NULL runtime passed to Worker_NewContext");
     return NULL;
   }
 
@@ -640,7 +636,7 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt)
 
   if (wrt->context_count >= wrt->max_contexts)
   {
-    LOG_ERROR("Maximum context count reached (%d)", wrt->max_contexts);
+    WINTERQ_LOG_ERROR("Maximum context count reached (%d)", wrt->max_contexts);
     uv_mutex_unlock(&wrt->context_mutex);
     return NULL;
   }
@@ -648,7 +644,7 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt)
   WorkerContext *wctx = calloc(1, sizeof(WorkerContext));
   if (!wctx)
   {
-    LOG_ERROR("Failed to allocate memory for worker context");
+    WINTERQ_LOG_ERROR("Failed to allocate memory for worker context");
     uv_mutex_unlock(&wrt->context_mutex);
     return NULL;
   }
@@ -656,7 +652,7 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt)
   JSContext *ctx = JS_NewContext(wrt->js_runtime);
   if (!ctx)
   {
-    LOG_ERROR("Failed to create new JS context");
+    WINTERQ_LOG_ERROR("Failed to create new JS context");
     SAFE_FREE(wctx);
     uv_mutex_unlock(&wrt->context_mutex);
     return NULL;
@@ -688,12 +684,12 @@ int Worker_Eval_JS(WorkerRuntime *wrt, const char *script)
 {
   if (!wrt)
   {
-    LOG_ERROR("NULL runtime passed to Worker_Eval_JS");
+    WINTERQ_LOG_ERROR("NULL runtime passed to Worker_Eval_JS");
     return 1;
   }
   if (!script)
   {
-    LOG_ERROR("NULL script passed to Worker_Eval_JS");
+    WINTERQ_LOG_ERROR("NULL script passed to Worker_Eval_JS");
     return 1;
   }
 
@@ -706,7 +702,7 @@ int Worker_Eval_JS(WorkerRuntime *wrt, const char *script)
     const char *str = JS_ToCString(ctx, exc);
     if (str)
     {
-      LOG_ERROR("JS Evaluation error: %s", str);
+      WINTERQ_LOG_ERROR("JS Evaluation error: %s", str);
       JS_FreeCString(ctx, str);
     }
 
@@ -741,19 +737,19 @@ int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode, size_t bytecode_
 {
   if (!wrt)
   {
-    LOG_ERROR("NULL runtime passed to Worker_Eval_Bytecode");
+    WINTERQ_LOG_ERROR("NULL runtime passed to Worker_Eval_Bytecode");
     return 1;
   }
   if (!bytecode || bytecode_len == 0)
   {
-    LOG_ERROR("Invalid bytecode data passed to Worker_Eval_Bytecode");
+    WINTERQ_LOG_ERROR("Invalid bytecode data passed to Worker_Eval_Bytecode");
     return 1;
   }
 
   WorkerContext *wctx = Worker_NewContext(wrt);
   if (!wctx)
   {
-    LOG_ERROR("Failed to create new context");
+    WINTERQ_LOG_ERROR("Failed to create new context");
     return 1;
   }
 
@@ -767,7 +763,7 @@ int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode, size_t bytecode_
     const char *str = JS_ToCString(ctx, exc);
     if (str)
     {
-      LOG_ERROR("Bytecode loading error: %s", str);
+      WINTERQ_LOG_ERROR("Bytecode loading error: %s", str);
       JS_FreeCString(ctx, str);
     }
     SAFE_JS_FREEVALUE(ctx, exc);
@@ -789,7 +785,7 @@ int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode, size_t bytecode_
     const char *str = JS_ToCString(ctx, exc);
     if (str)
     {
-      LOG_ERROR("Bytecode execution error: %s", str);
+      WINTERQ_LOG_ERROR("Bytecode execution error: %s", str);
       JS_FreeCString(ctx, str);
     }
     SAFE_JS_FREEVALUE(ctx, exc);
@@ -821,7 +817,7 @@ void Worker_RunLoop(WorkerRuntime *wrt)
 {
   if (!wrt || !wrt->loop)
   {
-    LOG_ERROR("Invalid runtime or loop in Worker_RunLoop");
+    WINTERQ_LOG_ERROR("Invalid runtime or loop in Worker_RunLoop");
     return;
   }
   uv_run(wrt->loop, UV_RUN_DEFAULT);
@@ -832,7 +828,7 @@ int Worker_RunLoopOnce(WorkerRuntime *wrt)
 {
   if (!wrt || !wrt->loop)
   {
-    LOG_ERROR("Invalid runtime or loop in Worker_RunLoopOnce");
+    WINTERQ_LOG_ERROR("Invalid runtime or loop in Worker_RunLoopOnce");
     return -1;
   }
   return uv_run(wrt->loop, UV_RUN_NOWAIT);
