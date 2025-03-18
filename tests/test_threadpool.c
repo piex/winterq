@@ -47,7 +47,7 @@ int main(int argc, char **argv)
       .max_contexts = 10,
       .global_queue_size = 100,
       .local_queue_size = 10,
-      .enable_work_stealing = true,
+      .enable_work_stealing = false,
       .idle_threshold = 2,
       .dynamic_sizing = false,
   };
@@ -78,9 +78,9 @@ int main(int argc, char **argv)
 
   printf("Added %d tasks to the queue\n", total_tasks);
 
-  // 等待所有任务完成（最多等待10秒）
+  // 等待所有任务完成（最多等待5秒）
   printf("Waiting for tasks to complete...\n");
-  int wait_result = wait_for_idle(pool, 10000);
+  int wait_result = wait_for_idle(pool, 5000);
 
   if (wait_result == 0)
   {

@@ -37,14 +37,15 @@ static void *worker_thread(void *arg);
 static void *pool_adjuster_thread(void *arg);
 static int create_worker_thread(ThreadPool *pool, int thread_id);
 static uint64_t get_current_time_ms(void);
-static void execute_task(ThreadData *tdata, Task *task);
+static void execute_task(ThreadData *thread_data, Task *task);
+static bool check_thread_idle(ThreadData *thread_data);
 
 typedef struct TaskCompletionState
 {
   Task *task;
   clock_t start_time; // 任务开始执行的时间
 
-  struct ThreadData *tdata; // 指向线程池的指针
+  struct ThreadData *thread_data; // 指向线程池的指针
 } TaskCompletionState;
 
 /**
@@ -59,17 +60,53 @@ get_current_time_ms(void)
   return (uint64_t)(tv.tv_sec) * 1000 + (uint64_t)(tv.tv_usec) / 1000;
 }
 
+static bool check_thread_idle(ThreadData *thread_data)
+{
+  WINTERQ_LOG_DEBUG("--------check_thread_idle----------\n");
+  int has_pending_events = Worker_RunLoopOnce(thread_data->runtime);
+  if (has_pending_events)
+    return false;
+
+  ThreadPool *pool = thread_data->pool;
+
+  atomic_store(&thread_data->idle, true);
+  atomic_fetch_add(&pool->idle_thread_count, 1);
+
+  // 计算并累加忙碌时间
+  uint64_t now = get_current_time_ms();
+  uint64_t busy_time = now - thread_data->idle_start;
+  atomic_fetch_add(&thread_data->busy_time, busy_time);
+
+  // 记录空闲开始时间
+  thread_data->idle_start = now;
+
+  // 通知调整线程
+  pthread_mutex_lock(&pool->idle_mutex);
+  pthread_cond_signal(&pool->idle_cond);
+  pthread_mutex_unlock(&pool->idle_mutex);
+  return true;
+}
+
 // 回调包装函数，用于计算执行时间并释放任务
 static void task_completion_callback(void *arg)
 {
+  WINTERQ_LOG_DEBUG("--------task_completion_callback----------\n");
   TaskCompletionState *taskState = (TaskCompletionState *)arg;
   if (!taskState)
     return;
 
   Task *task = taskState->task;
 
+  ThreadData *thread_data = taskState->thread_data;
+  if (!thread_data)
+  {
+    // 如果没有线程池指针，只释放任务
+    free(task);
+    free(taskState);
+    return;
+  }
   // 获取线程池指针（需要在Task结构体中添加）
-  ThreadPool *pool = taskState->tdata->pool;
+  ThreadPool *pool = thread_data->pool;
   if (!pool)
   {
     // 如果没有线程池指针，只释放任务
@@ -85,9 +122,6 @@ static void task_completion_callback(void *arg)
   WINTERQ_LOG_DEBUG("Task %d executed in %.2f seconds\n",
                     task->task_id, task->execution_time);
 
-  // 更新完成任务计数
-  atomic_fetch_add(&pool->completed_tasks, 1);
-
   // 保存回调信息，因为我们将在释放 wctx 之前调用它
   void (*callback)(void *) = task->callback;
   void *callback_arg = task->callback_arg;
@@ -102,6 +136,9 @@ static void task_completion_callback(void *arg)
     callback(callback_arg);
   }
 
+  // 更新完成任务计数
+  atomic_fetch_add(&pool->completed_tasks, 1);
+
   // 通知等待线程
   pthread_mutex_lock(&pool->wait_mutex);
   pthread_cond_signal(&pool->wait_cond);
@@ -115,6 +152,7 @@ static void task_completion_callback(void *arg)
  */
 static void init_task_queue(TaskQueue *queue, size_t max_size)
 {
+  WINTERQ_LOG_DEBUG("--------init_task_queue----------\n");
   if (queue == NULL)
     return;
 
@@ -153,6 +191,7 @@ static void init_task_queue(TaskQueue *queue, size_t max_size)
  */
 static void destroy_task_queue(TaskQueue *queue)
 {
+  WINTERQ_LOG_DEBUG("--------destroy_task_queue----------\n");
   if (queue == NULL)
     return;
 
@@ -196,6 +235,7 @@ static void destroy_task_queue(TaskQueue *queue)
  */
 static int enqueue_task(TaskQueue *queue, Task *task)
 {
+  WINTERQ_LOG_DEBUG("--------enqueue_task----------\n");
   if (queue == NULL || task == NULL)
     return -1;
 
@@ -256,6 +296,7 @@ static int enqueue_task(TaskQueue *queue, Task *task)
  */
 static Task *dequeue_task(TaskQueue *queue)
 {
+  WINTERQ_LOG_DEBUG("--------dequeue_task----------\n");
   if (queue == NULL)
     return NULL;
 
@@ -324,6 +365,7 @@ static Task *dequeue_task(TaskQueue *queue)
  */
 static Task *steal_task(ThreadPool *pool, int thief_id)
 {
+  WINTERQ_LOG_DEBUG("--------steal_task----------\n");
   if (pool == NULL || thief_id < 0 || thief_id >= pool->thread_count)
     return NULL;
 
@@ -385,21 +427,22 @@ static Task *steal_task(ThreadPool *pool, int thief_id)
  * @param runtime 执行任务的 Worker Runtime
  * @param task 要执行的任务
  */
-static void execute_task(ThreadData *tdata, Task *task)
+static void execute_task(ThreadData *thread_data, Task *task)
 {
-  if (tdata == NULL || task == NULL)
+  WINTERQ_LOG_DEBUG("--------execute_task----------\n");
+  if (thread_data == NULL || task == NULL)
     return;
 
   // 记录开始时间
-  TaskCompletionState *taskState = (TaskCompletionState *)calloc(1, sizeof(calloc));
+  TaskCompletionState *taskState = (TaskCompletionState *)calloc(1, sizeof(TaskCompletionState));
   taskState->task = task;
   taskState->start_time = clock();
-  taskState->tdata = tdata;
+  taskState->thread_data = thread_data;
 
   if (task->is_script)
   {
     // 执行JavaScript脚本
-    Worker_Eval_JS(tdata->runtime, task->script, task_completion_callback, taskState);
+    Worker_Eval_JS(thread_data->runtime, task->script, task_completion_callback, taskState);
     if (task->script != NULL)
     {
       free((void *)task->script); // 释放脚本字符串
@@ -408,7 +451,7 @@ static void execute_task(ThreadData *tdata, Task *task)
   }
   else
   { // 执行JavaScript字节码
-    Worker_Eval_Bytecode(tdata->runtime, task->bytecode, task->bytecode_len, task_completion_callback, taskState);
+    Worker_Eval_Bytecode(thread_data->runtime, task->bytecode, task->bytecode_len, task_completion_callback, taskState);
     if (task->bytecode != NULL)
     {
       free(task->bytecode); // 释放字节码
@@ -417,7 +460,7 @@ static void execute_task(ThreadData *tdata, Task *task)
   }
 
   // 执行一次事件循环，处理可能的定时器和其他异步任务
-  Worker_RunLoopOnce(tdata->runtime);
+  Worker_RunLoopOnce(thread_data->runtime);
 
   WINTERQ_LOG_DEBUG("Task %d executed synchronous successfully.\n",
                     task->task_id);
@@ -426,6 +469,7 @@ static void execute_task(ThreadData *tdata, Task *task)
 // 线程工作函数
 static void *worker_thread(void *arg)
 {
+  WINTERQ_LOG_DEBUG("--------worker_thread----------\n");
   ThreadData *thread_data = (ThreadData *)arg;
   ThreadPool *pool = thread_data->pool;
   Task *task = NULL;
@@ -466,6 +510,7 @@ static void *worker_thread(void *arg)
       // 更新线程状态为忙碌
       if (was_idle)
       {
+        was_idle = false;
         atomic_store(&thread_data->idle, false);
         atomic_fetch_sub(&pool->idle_thread_count, 1);
 
@@ -483,40 +528,21 @@ static void *worker_thread(void *arg)
       // 更新统计信息
       atomic_fetch_add(&thread_data->tasks_processed, 1);
     }
-    else
+
+    if (!was_idle)
     {
-      // 如果没有任务，切换到空闲状态
-      if (!was_idle)
-      {
-        atomic_store(&thread_data->idle, true);
-        atomic_fetch_add(&pool->idle_thread_count, 1);
+      // 处理异步逻辑，并判断是否空闲
+      was_idle = check_thread_idle(thread_data);
+    }
 
-        // 计算并累加忙碌时间
-        uint64_t now = get_current_time_ms();
-        uint64_t busy_time = now - thread_data->idle_start;
-        atomic_fetch_add(&thread_data->busy_time, busy_time);
-
-        // 记录空闲开始时间
-        thread_data->idle_start = now;
-
-        // 通知调整线程
-        pthread_mutex_lock(&pool->idle_mutex);
-        pthread_cond_signal(&pool->idle_cond);
-        pthread_mutex_unlock(&pool->idle_mutex);
-      }
-
-      // 在空闲时处理事件循环，确保定时器能够执行
-      int has_pending_events = Worker_RunLoopOnce(thread_data->runtime);
-
-      // 只有当没有待处理事件时才休眠
-      if (!has_pending_events)
-      {
-        // 短暂休眠以避免CPU占用过高
-        struct timespec ts;
-        ts.tv_sec = 0;
-        ts.tv_nsec = 10000000; // 10ms
-        nanosleep(&ts, NULL);
-      }
+    // 只有当没有待处理事件时才休眠
+    if (was_idle)
+    {
+      // 短暂休眠以避免CPU占用过高
+      struct timespec ts;
+      ts.tv_sec = 0;
+      ts.tv_nsec = 100 * 1000 * 1000; // 1ms
+      nanosleep(&ts, NULL);
     }
   }
 
@@ -552,6 +578,7 @@ static void *worker_thread(void *arg)
  */
 static void *pool_adjuster_thread(void *arg)
 {
+  WINTERQ_LOG_DEBUG("--------pool_adjuster_thread----------\n");
   ThreadPool *pool = (ThreadPool *)arg;
   if (pool == NULL)
     return NULL;
@@ -606,6 +633,7 @@ static void *pool_adjuster_thread(void *arg)
  */
 static int create_worker_thread(ThreadPool *pool, int thread_id)
 {
+  WINTERQ_LOG_DEBUG("--------create_worker_thread----------\n");
   if (pool == NULL || thread_id < 0 || thread_id >= pool->thread_count)
     return -1;
 
@@ -637,6 +665,7 @@ static int create_worker_thread(ThreadPool *pool, int thread_id)
 
 ThreadPool *init_thread_pool(ThreadPoolConfig config)
 {
+  WINTERQ_LOG_DEBUG("--------init_thread_pool----------\n");
   ThreadPool *pool = NULL;
   int i;
 
@@ -750,6 +779,7 @@ ThreadPool *init_thread_pool(ThreadPoolConfig config)
 int add_script_task_to_pool(ThreadPool *pool, const char *script,
                             void (*callback)(void *), void *callback_arg)
 {
+  WINTERQ_LOG_DEBUG("--------add_script_task_to_pool----------\n");
   if (pool == NULL || script == NULL)
     return -1;
 
@@ -799,6 +829,7 @@ int add_script_task_to_pool(ThreadPool *pool, const char *script,
  */
 int add_bytecode_task_to_pool(ThreadPool *pool, uint8_t *bytecode, size_t bytecode_len, void (*callback)(void *), void *callback_arg)
 {
+  WINTERQ_LOG_DEBUG("--------add_bytecode_task_to_pool----------\n");
   if (pool == NULL || bytecode == NULL || bytecode_len == 0)
     return -1;
 
@@ -842,6 +873,7 @@ int add_bytecode_task_to_pool(ThreadPool *pool, uint8_t *bytecode, size_t byteco
 // 关闭线程池
 void shutdown_thread_pool(ThreadPool *pool)
 {
+  WINTERQ_LOG_DEBUG("--------shutdown_thread_pool----------\n");
   if (pool == NULL)
     return;
 
@@ -893,6 +925,7 @@ void shutdown_thread_pool(ThreadPool *pool)
  */
 ThreadPoolStats get_thread_pool_stats(ThreadPool *pool)
 {
+  WINTERQ_LOG_DEBUG("--------get_thread_pool_stats----------\n");
   ThreadPoolStats stats = {0};
 
   if (pool == NULL)
@@ -945,6 +978,7 @@ ThreadPoolStats get_thread_pool_stats(ThreadPool *pool)
  */
 int wait_for_idle(ThreadPool *pool, int timeout_ms)
 {
+  WINTERQ_LOG_DEBUG("--------wait_for_idle----------\n");
   if (pool == NULL)
     return -1;
 
@@ -1000,6 +1034,7 @@ int wait_for_idle(ThreadPool *pool, int timeout_ms)
  */
 int resize_thread_pool(ThreadPool *pool, int new_thread_count)
 {
+  WINTERQ_LOG_DEBUG("--------resize_thread_pool----------\n");
   if (pool == NULL || new_thread_count <= 0)
   {
     return -1;
@@ -1092,6 +1127,7 @@ int resize_thread_pool(ThreadPool *pool, int new_thread_count)
  */
 int get_thread_stats(ThreadPool *pool, int thread_id, ThreadData *stats)
 {
+  WINTERQ_LOG_DEBUG("--------get_thread_stats----------\n");
   if (pool == NULL || stats == NULL || thread_id < 0 || thread_id >= pool->thread_count)
   {
     return -1;
