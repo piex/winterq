@@ -21,14 +21,11 @@ typedef struct Task
   size_t bytecode_len; // 字节码长度
 
   // 性能指标
-  clock_t start_time;    // 任务开始执行的时间
   double execution_time; // 任务执行时间(秒)
 
   // 回调机制
   void (*callback)(void *); // 任务完成后的回调函数
   void *callback_arg;       // 回调函数的参数
-
-  struct ThreadPool *pool; // 指向线程池的指针
 } Task;
 
 /**

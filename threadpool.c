@@ -37,13 +37,22 @@ static void *worker_thread(void *arg);
 static void *pool_adjuster_thread(void *arg);
 static int create_worker_thread(ThreadPool *pool, int thread_id);
 static uint64_t get_current_time_ms(void);
-static void execute_task(WorkerRuntime *runtime, Task *task);
+static void execute_task(ThreadData *tdata, Task *task);
+
+typedef struct TaskCompletionState
+{
+  Task *task;
+  clock_t start_time; // 任务开始执行的时间
+
+  struct ThreadData *tdata; // 指向线程池的指针
+} TaskCompletionState;
 
 /**
  * @brief 获取当前时间戳（毫秒）
  * @return 当前时间的毫秒时间戳
  */
-static uint64_t get_current_time_ms(void)
+static uint64_t
+get_current_time_ms(void)
 {
   struct timeval tv;
   gettimeofday(&tv, NULL);
@@ -53,22 +62,25 @@ static uint64_t get_current_time_ms(void)
 // 回调包装函数，用于计算执行时间并释放任务
 static void task_completion_callback(void *arg)
 {
-  Task *task = (Task *)arg;
-  if (!task)
+  TaskCompletionState *taskState = (TaskCompletionState *)arg;
+  if (!taskState)
     return;
 
+  Task *task = taskState->task;
+
   // 获取线程池指针（需要在Task结构体中添加）
-  ThreadPool *pool = task->pool;
+  ThreadPool *pool = taskState->tdata->pool;
   if (!pool)
   {
     // 如果没有线程池指针，只释放任务
     free(task);
+    free(taskState);
     return;
   }
 
   // 计算执行时间
   clock_t end_time = clock();
-  task->execution_time = ((double)(end_time - task->start_time)) / CLOCKS_PER_SEC;
+  task->execution_time = ((double)(end_time - taskState->start_time)) / CLOCKS_PER_SEC;
 
   WINTERQ_LOG_DEBUG("Task %d executed in %.2f seconds\n",
                     task->task_id, task->execution_time);
@@ -82,6 +94,7 @@ static void task_completion_callback(void *arg)
 
   // 释放任务
   free(task);
+  free(taskState);
 
   // 调用原始回调（如果有）
   if (callback)
@@ -352,13 +365,6 @@ static Task *steal_task(ThreadPool *pool, int thief_id)
         task = node->task;
         free(node);
 
-        // 确保任务的pool指针指向正确的线程池
-        // 这在窃取任务时特别重要，以确保回调能正确更新统计信息
-        if (task != NULL)
-        {
-          task->pool = pool;
-        }
-
         WINTERQ_LOG_INFO("Thread %d stole task from thread %d\n", thief_id, victim_id);
       }
 
@@ -379,18 +385,21 @@ static Task *steal_task(ThreadPool *pool, int thief_id)
  * @param runtime 执行任务的 Worker Runtime
  * @param task 要执行的任务
  */
-static void execute_task(WorkerRuntime *runtime, Task *task)
+static void execute_task(ThreadData *tdata, Task *task)
 {
-  if (runtime == NULL || task == NULL)
+  if (tdata == NULL || task == NULL)
     return;
 
   // 记录开始时间
-  task->start_time = clock();
+  TaskCompletionState *taskState = (TaskCompletionState *)calloc(1, sizeof(calloc));
+  taskState->task = task;
+  taskState->start_time = clock();
+  taskState->tdata = tdata;
 
   if (task->is_script)
   {
     // 执行JavaScript脚本
-    Worker_Eval_JS(runtime, task->script, task_completion_callback, task);
+    Worker_Eval_JS(tdata->runtime, task->script, task_completion_callback, taskState);
     if (task->script != NULL)
     {
       free((void *)task->script); // 释放脚本字符串
@@ -399,7 +408,7 @@ static void execute_task(WorkerRuntime *runtime, Task *task)
   }
   else
   { // 执行JavaScript字节码
-    Worker_Eval_Bytecode(runtime, task->bytecode, task->bytecode_len, task_completion_callback, task);
+    Worker_Eval_Bytecode(tdata->runtime, task->bytecode, task->bytecode_len, task_completion_callback, taskState);
     if (task->bytecode != NULL)
     {
       free(task->bytecode); // 释放字节码
@@ -408,7 +417,7 @@ static void execute_task(WorkerRuntime *runtime, Task *task)
   }
 
   // 执行一次事件循环，处理可能的定时器和其他异步任务
-  Worker_RunLoopOnce(runtime);
+  Worker_RunLoopOnce(tdata->runtime);
 
   WINTERQ_LOG_DEBUG("Task %d executed synchronous successfully.\n",
                     task->task_id);
@@ -469,7 +478,7 @@ static void *worker_thread(void *arg)
         thread_data->idle_start = now;
       }
       // 执行任务
-      execute_task(thread_data->runtime, task);
+      execute_task(thread_data, task);
 
       // 更新统计信息
       atomic_fetch_add(&thread_data->tasks_processed, 1);
@@ -626,11 +635,6 @@ static int create_worker_thread(ThreadPool *pool, int thread_id)
   return 0;
 }
 
-/**
- * @brief 初始化线程池
- * @param config 线程池配置
- * @return 初始化成功的线程池指针，失败返回NULL
- */
 ThreadPool *init_thread_pool(ThreadPoolConfig config)
 {
   ThreadPool *pool = NULL;
@@ -654,10 +658,12 @@ ThreadPool *init_thread_pool(ThreadPoolConfig config)
   // 初始化配置
   pool->config = config;
   pool->thread_count = config.thread_count;
-  pool->max_tasks = 0;
   atomic_init(&pool->shutdown, false);
+
+  pool->max_tasks = 0;
   atomic_init(&pool->completed_tasks, 0);
   atomic_init(&pool->total_tasks, 0);
+
   atomic_init(&pool->idle_thread_count, 0);
   atomic_init(&pool->adjuster_running, false);
 
@@ -769,7 +775,6 @@ int add_script_task_to_pool(ThreadPool *pool, const char *script,
   task->task_id = atomic_fetch_add(&pool->total_tasks, 1);
   task->callback = callback;
   task->callback_arg = callback_arg;
-  task->pool = pool; // 设置线程池指针
 
   // 尝试添加到全局队列
   if (enqueue_task(&pool->queue, task) != 0)
@@ -821,7 +826,6 @@ int add_bytecode_task_to_pool(ThreadPool *pool, uint8_t *bytecode, size_t byteco
   task->task_id = atomic_fetch_add(&pool->total_tasks, 1);
   task->callback = callback;
   task->callback_arg = callback_arg;
-  task->pool = pool;
 
   // 尝试添加到全局队列
   if (enqueue_task(&pool->queue, task) != 0)
