@@ -420,7 +420,6 @@ static void *worker_thread(void *arg)
   ThreadData *thread_data = (ThreadData *)arg;
   ThreadPool *pool = thread_data->pool;
   Task *task = NULL;
-  uint64_t idle_start = 0;
   int thread_id = thread_data->thread_id;
 
   WorkerRuntime *wrt = Worker_NewRuntime(thread_data->max_contexts);
@@ -435,7 +434,7 @@ static void *worker_thread(void *arg)
   // 线程开始时为空闲状态
   atomic_store(&thread_data->idle, true);
   atomic_fetch_add(&pool->idle_thread_count, 1);
-  idle_start = get_current_time_ms();
+  thread_data->idle_start = get_current_time_ms();
 
   WINTERQ_LOG_INFO("Worker thread %d started\n", thread_id);
 
@@ -463,11 +462,11 @@ static void *worker_thread(void *arg)
 
         // 计算并累加空闲时间
         uint64_t now = get_current_time_ms();
-        uint64_t idle_time = now - idle_start;
+        uint64_t idle_time = now - thread_data->idle_start;
         atomic_fetch_add(&thread_data->idle_time, idle_time);
 
         // 记录忙碌开始时间
-        idle_start = now;
+        thread_data->idle_start = now;
       }
       // 执行任务
       execute_task(thread_data->runtime, task);
@@ -485,11 +484,11 @@ static void *worker_thread(void *arg)
 
         // 计算并累加忙碌时间
         uint64_t now = get_current_time_ms();
-        uint64_t busy_time = now - idle_start;
+        uint64_t busy_time = now - thread_data->idle_start;
         atomic_fetch_add(&thread_data->busy_time, busy_time);
 
         // 记录空闲开始时间
-        idle_start = now;
+        thread_data->idle_start = now;
 
         // 通知调整线程
         pthread_mutex_lock(&pool->idle_mutex);
@@ -525,12 +524,12 @@ static void *worker_thread(void *arg)
   // 计算最终的空闲/忙碌时间
   if (atomic_load(&thread_data->idle))
   {
-    uint64_t idle_time = get_current_time_ms() - idle_start;
+    uint64_t idle_time = get_current_time_ms() - thread_data->idle_start;
     atomic_fetch_add(&thread_data->idle_time, idle_time);
   }
   else
   {
-    uint64_t busy_time = get_current_time_ms() - idle_start;
+    uint64_t busy_time = get_current_time_ms() - thread_data->idle_start;
     atomic_fetch_add(&thread_data->busy_time, busy_time);
   }
 
@@ -608,6 +607,7 @@ static int create_worker_thread(ThreadPool *pool, int thread_id)
   thread_data->pool = pool;
   thread_data->max_contexts = pool->config.max_contexts;
   thread_data->runtime = NULL;
+  thread_data->idle_start = 0;
   atomic_store(&thread_data->idle, true);
   atomic_store(&thread_data->tasks_processed, 0);
   atomic_store(&thread_data->idle_time, 0);
@@ -942,9 +942,7 @@ ThreadPoolStats get_thread_pool_stats(ThreadPool *pool)
 int wait_for_idle(ThreadPool *pool, int timeout_ms)
 {
   if (pool == NULL)
-  {
     return -1;
-  }
 
   struct timespec ts;
   int rc = 0;

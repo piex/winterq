@@ -85,6 +85,7 @@ typedef struct ThreadData
   // 性能统计
   atomic_bool idle;                // 线程是否空闲
   atomic_int tasks_processed;      // 该线程处理的任务数量
+  uint64_t idle_start;             // 开始计时时间
   atomic_uint_least64_t idle_time; // 线程空闲的累计时间(毫秒)
   atomic_uint_least64_t busy_time; // 线程忙碌的累计时间(毫秒)
 } ThreadData;
