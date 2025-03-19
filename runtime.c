@@ -207,10 +207,10 @@ static WorkerContext *get_worker_context(JSContext *ctx)
     return NULL;
   }
   JSValue global_obj = JS_GetGlobalObject(ctx);
-  JSValue js_wctx = JS_GetPropertyStr(ctx, global_obj, "__worker_context__");
+  JSValue js_wctx = JS_GetPropertyStr(ctx, global_obj, "________winterq_worker_context________");
   if (JS_IsException(js_wctx) || JS_IsUndefined(js_wctx))
   {
-    WINTERQ_LOG_ERROR("Failed to get __worker_context__ property");
+    WINTERQ_LOG_ERROR("Failed to get ________winterq_worker_context________ property");
     SAFE_JS_FREEVALUE(ctx, global_obj);
     return NULL;
   }
@@ -738,7 +738,7 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt)
 
   JSValue js_wctx = JS_NewObjectClass(ctx, js_worker_context_class_id);
   JS_SetOpaque(js_wctx, wctx);
-  JS_SetPropertyStr(ctx, global, "__worker_context__", js_wctx);
+  JS_SetPropertyStr(ctx, global, "________winterq_worker_context________", js_wctx);
 
   js_std_init_console(ctx);
   js_std_init_timer(ctx);
