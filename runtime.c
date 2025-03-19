@@ -75,10 +75,9 @@ WorkerRuntime *Worker_NewRuntime(int max_contexts)
   wrt->max_contexts = max_contexts;
   wrt->context_count = 0;
   wrt->next_timer_id = 1;
+  wrt->context_list = NULL;
 
   uv_mutex_init(&wrt->context_mutex);
-  // 初始化微任务定时器
-  uv_timer_init(loop, &wrt->microtask_timer);
 
   // Initialize the timer table for faster lookups
   init_timer_table(wrt);
@@ -99,21 +98,34 @@ void Worker_FreeRuntime(WorkerRuntime *wrt)
   if (!wrt)
     return;
 
-  // Stop the microtask timer
-  uv_timer_stop(&wrt->microtask_timer);
-
   // Close all active handles in the loop
-  uv_close((uv_handle_t *)&wrt->microtask_timer, NULL);
-
-  // 强制关闭所有活跃的句柄
   uv_walk(wrt->loop, close_all_handles_walk_cb, NULL);
 
   // 运行事件循环以处理关闭回调
-  while (uv_run(wrt->loop, UV_RUN_NOWAIT) > 0)
-    ;
+  // Run the loop until all handles are closed
+  // Use UV_RUN_ONCE or UV_RUN_NOWAIT to avoid blocking forever
+  while (uv_run(wrt->loop, UV_RUN_ONCE) > 0)
+  {
+    // Continue processing until no more active handles
+  }
 
   // Clean up resources
   cleanup_timer_table(wrt);
+
+  // Free all active contexts
+  uv_mutex_lock(&wrt->context_mutex);
+  WorkerContext *curr = wrt->context_list;
+  wrt->context_list = NULL;
+  uv_mutex_unlock(&wrt->context_mutex);
+
+  // Free all contexts
+  while (curr)
+  {
+    WorkerContext *next = curr->next;
+    Worker_FreeContext(curr);
+    curr = next;
+  }
+
   uv_mutex_destroy(&wrt->context_mutex);
 
   // 在释放 JS 运行时之前，确保所有 JS 对象都被释放
@@ -127,9 +139,17 @@ void Worker_FreeRuntime(WorkerRuntime *wrt)
     int handle_count = 0;
     uv_walk(wrt->loop, count_handles_walk_cb, &handle_count);
     WINTERQ_LOG_WARNING("There are still %d active handles", handle_count);
+
+    if (handle_count > 0)
+      // Last resort: force close the loop (may cause memory leaks)
+      uv_loop_fork(wrt->loop); // This is a hack to force detachment of handles
   }
 
-  JS_FreeRuntime(wrt->js_runtime);
+  if (wrt->js_runtime)
+  {
+    JS_FreeRuntime(wrt->js_runtime);
+    wrt->js_runtime = NULL;
+  }
   SAFE_FREE(wrt->loop);
   SAFE_FREE(wrt);
 }
@@ -139,13 +159,37 @@ void Worker_FreeContext(WorkerContext *wctx)
   if (!wctx)
     return;
 
-  // 保存回调信息，因为我们将在释放 wctx 之前调用它
+  // Cancel all pending timers associated with this context
+  Worker_CancelContextTimers(wctx);
+
+  // 保存回调信息，因为我们将在释放 wctx 之后调用它
   void (*callback)(void *) = wctx->callback;
   void *callback_arg = wctx->callback_arg;
 
-  uv_mutex_lock(&wctx->runtime->context_mutex);
-  wctx->runtime->context_count--;
-  uv_mutex_unlock(&wctx->runtime->context_mutex);
+  WorkerRuntime *wrt = wctx->runtime;
+
+  // Remove from the context list
+  uv_mutex_lock(&wrt->context_mutex);
+  if (wrt->context_list == wctx)
+  {
+    // It's the head of the list
+    wrt->context_list = wctx->next;
+  }
+  else
+  {
+    // Find it in the list
+    WorkerContext *curr = wrt->context_list;
+    while (curr && curr->next != wctx)
+    {
+      curr = curr->next;
+    }
+    if (curr)
+    {
+      curr->next = wctx->next;
+    }
+  }
+  wrt->context_count--;
+  uv_mutex_unlock(&wrt->context_mutex);
   JS_FreeContext(wctx->js_context);
   SAFE_FREE(wctx);
 
@@ -243,8 +287,14 @@ void close_timer_callback(uv_handle_t *handle)
   // Remove the timer from the lookup table
   remove_timer_from_table(wctx->runtime, timer_data->timer_id);
 
-  // 释放JS回调函数
-  SAFE_JS_FREEVALUE(ctx, timer_data->callback);
+  // Clear the JS value reference first
+  if (ctx && !JS_IsUndefined(timer_data->callback))
+  {
+    // 释放JS回调函数
+    SAFE_JS_FREEVALUE(ctx, timer_data->callback);
+    timer_data->callback = JS_UNDEFINED;
+  }
+
   SAFE_FREE(timer_data);
 
   // 减少活跃定时器计数
@@ -534,6 +584,13 @@ static uv_timer_t *find_timer_by_id(WorkerRuntime *wrt, int timer_id)
   return NULL;
 }
 
+void close_cb(uv_handle_t *handle)
+{
+  // This callback is called after the handle is closed
+  // You can free any resources associated with the handle here
+  free(handle);
+}
+
 static void close_all_handles_walk_cb(uv_handle_t *handle, void *arg)
 {
   if (!uv_is_closing(handle))
@@ -543,7 +600,7 @@ static void close_all_handles_walk_cb(uv_handle_t *handle, void *arg)
     {
       uv_timer_stop((uv_timer_t *)handle);
     }
-    uv_close(handle, NULL);
+    uv_close(handle, close_cb);
   }
 }
 
@@ -670,6 +727,9 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt)
   wctx->active_timers = 0;
   wctx->runtime = wrt;
   wctx->pending_free = 0;
+
+  wctx->next = wrt->context_list;
+  wrt->context_list = wctx;
 
   uv_mutex_unlock(&wrt->context_mutex);
 
@@ -915,7 +975,7 @@ void Worker_CancelContextTimers(WorkerContext *wctx)
 
   uv_mutex_lock(&wrt->timer_table->mutex);
 
-  // 收集此上下文的所有定时器 ID
+  // Collect all timers for this context
   for (int i = 0; i < TIMER_TABLE_SIZE; i++)
   {
     timer_entry **entry_ptr = &wrt->timer_table->entries[i];
@@ -931,13 +991,25 @@ void Worker_CancelContextTimers(WorkerContext *wctx)
         timer_data_t *timer_data = (timer_data_t *)timer->data;
         if (timer_data->wctx == wctx)
         {
-          // 停止定时器
+          // Stop the timer
           uv_timer_stop(timer);
+
+          // Remove the timer from the lookup table
+          remove_timer_from_table(wctx->runtime, timer_data->timer_id);
+
+          // For interval timers, make sure to clear the JS callback explicitly
+          if (!JS_IsUndefined(timer_data->callback))
+          {
+            SAFE_JS_FREEVALUE(timer_data->ctx, timer_data->callback);
+            timer_data->callback = JS_UNDEFINED;
+          }
+          SAFE_FREE(timer_data);
+
           uv_close((uv_handle_t *)timer, close_timer_callback);
 
           // 从链表中移除此项
           *entry_ptr = next_entry;
-          free(entry);
+          SAFE_FREE(entry);
         }
         else
         {
@@ -949,7 +1021,7 @@ void Worker_CancelContextTimers(WorkerContext *wctx)
       {
         // 处理无效定时器数据的情况
         *entry_ptr = next_entry;
-        free(entry);
+        SAFE_FREE(entry);
       }
 
       entry = next_entry;

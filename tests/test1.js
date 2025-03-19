@@ -1,4 +1,3 @@
-console.info("---- test1.js ----");
 function assert(b, str) {
 	if (b) {
 		return;

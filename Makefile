@@ -37,7 +37,8 @@ test_runtime:
 		./tests/test3.js \
 		./tests/test4.js \
 		./tests/test5.js \
-		./tests/test6.js && \
+		./tests/test6.js \
+		./tests/test7.js && \
 	rm -rf ./test_runtime
 
 test_threadpool:
@@ -48,5 +49,6 @@ test_threadpool:
 		./tests/test3.js \
 		./tests/test4.js \
 		./tests/test5.js \
-		./tests/test6.js 10 && \
+		./tests/test6.js \
+		./tests/test7.js 10 && \
 	rm -rf ./test_threadpool

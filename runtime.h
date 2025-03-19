@@ -5,6 +5,9 @@
 #include <quickjs.h>
 #include <stdint.h>
 
+typedef struct WorkerContext WorkerContext;
+typedef struct WorkerRuntime WorkerRuntime;
+
 // Hash table for timers to allow for faster lookups when clearing
 typedef struct timer_entry
 {
@@ -28,7 +31,7 @@ typedef struct
   int active_timers;
 } WorkerRuntimeStats;
 
-typedef struct
+typedef struct WorkerRuntime
 {
   JSRuntime *js_runtime; // 每个线程一个 JSRuntime
 
@@ -37,13 +40,14 @@ typedef struct
   int max_contexts;         // 最多同时执行的 JSContext
   int context_count;        // 已经初始化的 context 数量
 
+  WorkerContext *context_list; // Head of the context linked list
+
   int next_timer_id;
-  uv_timer_t microtask_timer; // 用于执行微任务的定时器
 
   timer_table *timer_table;
 } WorkerRuntime;
 
-typedef struct
+typedef struct WorkerContext
 {
   JSContext *js_context;
   WorkerRuntime *runtime;
@@ -53,6 +57,8 @@ typedef struct
 
   int active_timers;
   int pending_free;
+
+  WorkerContext *next; // Next context in the list
 } WorkerContext;
 
 /**

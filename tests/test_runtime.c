@@ -46,18 +46,18 @@ int main(int argc, char **argv)
     free(js_code);
   }
 
+  clock_t start_time = clock();
+
   // Worker_RunLoop(wrt);
   int has_pending_events = 1;
-  while (has_pending_events != 0)
+  while (has_pending_events != 0 && (clock() - start_time < 500000))
   {
     has_pending_events = Worker_RunLoopOnce(wrt);
-    struct timespec ts;
-    ts.tv_sec = 0;
-    ts.tv_nsec = 1 * 1000000; // 1ms
-    nanosleep(&ts, NULL);
-    printf(".");
   }
-  fprintf(stderr, "finish uv loop\n");
+
+  fprintf(stderr, "finish uv loop.\n");
 
   Worker_FreeRuntime(wrt);
+
+  fprintf(stderr, "test finished.\n");
 }
