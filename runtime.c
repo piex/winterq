@@ -145,9 +145,9 @@ void Worker_FreeRuntime(WorkerRuntime *wrt)
 
   if (wrt->js_runtime)
   {
-    JSMemoryUsage s;
-    JS_ComputeMemoryUsage(wrt->js_runtime, &s);
-    JS_DumpMemoryUsage(stdout, &s, wrt->js_runtime);
+    // JSMemoryUsage s;
+    // JS_ComputeMemoryUsage(wrt->js_runtime, &s);
+    // JS_DumpMemoryUsage(stdout, &s, wrt->js_runtime);
     JS_FreeRuntime(wrt->js_runtime);
     wrt->js_runtime = NULL;
   }
@@ -192,6 +192,7 @@ void Worker_FreeContext(WorkerContext *wctx)
   wrt->context_count--;
   uv_mutex_unlock(&wrt->context_mutex);
   JS_FreeContext(wctx->js_context);
+  printf("-------JS_FreeContext------\n\n");
   SAFE_FREE(wctx);
 
   // 如果有回调函数，执行回调
@@ -592,13 +593,6 @@ static uv_timer_t *find_timer_by_id(WorkerRuntime *wrt, int timer_id)
   return NULL;
 }
 
-void close_cb(uv_handle_t *handle)
-{
-  // This callback is called after the handle is closed
-  // You can free any resources associated with the handle here
-  free(handle);
-}
-
 static void close_all_handles_walk_cb(uv_handle_t *handle, void *arg)
 {
   if (!uv_is_closing(handle))
@@ -608,7 +602,7 @@ static void close_all_handles_walk_cb(uv_handle_t *handle, void *arg)
     {
       uv_timer_stop((uv_timer_t *)handle);
     }
-    uv_close(handle, close_cb);
+    uv_close(handle, close_timer_callback);
   }
 }
 
