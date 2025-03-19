@@ -109,13 +109,8 @@ void Worker_FreeRuntime(WorkerRuntime *wrt)
     // Continue processing until no more active handles
   }
 
-  // Clean up resources
-  cleanup_timer_table(wrt);
-
-  // Free all active contexts
   uv_mutex_lock(&wrt->context_mutex);
   WorkerContext *curr = wrt->context_list;
-  wrt->context_list = NULL;
   uv_mutex_unlock(&wrt->context_mutex);
 
   // Free all contexts
@@ -125,6 +120,9 @@ void Worker_FreeRuntime(WorkerRuntime *wrt)
     Worker_FreeContext(curr);
     curr = next;
   }
+
+  // Clean up resources
+  cleanup_timer_table(wrt);
 
   uv_mutex_destroy(&wrt->context_mutex);
 
@@ -147,6 +145,9 @@ void Worker_FreeRuntime(WorkerRuntime *wrt)
 
   if (wrt->js_runtime)
   {
+    JSMemoryUsage s;
+    JS_ComputeMemoryUsage(wrt->js_runtime, &s);
+    JS_DumpMemoryUsage(stdout, &s, wrt->js_runtime);
     JS_FreeRuntime(wrt->js_runtime);
     wrt->js_runtime = NULL;
   }
@@ -242,15 +243,15 @@ void execute_microtask_timer(JSContext *ctx)
   }
 
   // 执行所有待处理的任务，但限制最大执行次数以避免无限循环
-  int hasPending;
+  int pending_jobs = 0;
   int count = 0;
   do
   {
-    hasPending = JS_ExecutePendingJob(rt, &ctx);
+    pending_jobs = JS_ExecutePendingJob(rt, &ctx);
     count++;
-  } while (hasPending > 0 && count < MAX_MICROTASK_ITERATIONS);
+  } while (pending_jobs > 0 && count < MAX_MICROTASK_ITERATIONS);
 
-  if (count >= MAX_MICROTASK_ITERATIONS && hasPending > 0)
+  if (count >= MAX_MICROTASK_ITERATIONS && pending_jobs > 0)
   {
     WINTERQ_LOG_WARNING("Reached maximum microtask iterations (%d)", MAX_MICROTASK_ITERATIONS);
   }
@@ -522,6 +523,13 @@ static void cleanup_timer_table(WorkerRuntime *wrt)
     while (entry)
     {
       timer_entry *next = entry->next;
+      uv_timer_t *timer = entry->timer;
+      if (timer && timer->data)
+      {
+        timer_data_t *timer_data = (timer_data_t *)timer->data;
+        clear_timer(wrt, timer_data->timer_id);
+      }
+
       SAFE_FREE(entry);
       entry = next;
     }
@@ -991,8 +999,7 @@ void Worker_CancelContextTimers(WorkerContext *wctx)
         timer_data_t *timer_data = (timer_data_t *)timer->data;
         if (timer_data->wctx == wctx)
         {
-          // Stop the timer
-          uv_timer_stop(timer);
+          clear_timer(wctx->runtime, timer_data->timer_id);
 
           // Remove the timer from the lookup table
           remove_timer_from_table(wctx->runtime, timer_data->timer_id);
@@ -1004,8 +1011,6 @@ void Worker_CancelContextTimers(WorkerContext *wctx)
             timer_data->callback = JS_UNDEFINED;
           }
           SAFE_FREE(timer_data);
-
-          uv_close((uv_handle_t *)timer, close_timer_callback);
 
           // 从链表中移除此项
           *entry_ptr = next_entry;

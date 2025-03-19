@@ -1,5 +1,5 @@
 
-console.info("---- test1.js ----");
+console.info("---- test7.js ----");
 
 const t = setInterval(() => {
 	console.info("---- test7.js interval ----");
