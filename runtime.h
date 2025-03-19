@@ -130,7 +130,7 @@ void Worker_RunLoop(WorkerRuntime *wrt);
 int Worker_RunLoopOnce(WorkerRuntime *wrt);
 
 void Worker_RequestContextFree(WorkerContext *wctx);
-void Worker_GetStats(WorkerRuntime *wrt, WorkerRuntimeStats *stats);
+void Worker_GetRuntimeStats(WorkerRuntime *wrt, WorkerRuntimeStats *stats);
 void Worker_CancelContextTimers(WorkerContext *wctx);
 
 #endif /* WINTERQ_RUNTIME_H */

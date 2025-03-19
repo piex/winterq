@@ -27,9 +27,9 @@ typedef struct
 } timer_data_t;
 
 // Forward declarations
+static WorkerContext *get_worker_context(JSContext *ctx);
 static void execute_microtask_timer(JSContext *ctx);
 static void close_timer_callback(uv_handle_t *handle);
-static WorkerContext *get_worker_context(JSContext *ctx);
 static void init_timer_table(WorkerRuntime *wrt);
 static void cleanup_timer_table(WorkerRuntime *wrt);
 static void add_timer_to_table(WorkerRuntime *wrt, int timer_id, uv_timer_t *timer);
@@ -227,7 +227,7 @@ static WorkerContext *get_worker_context(JSContext *ctx)
 }
 
 // 执行 QuickJS 的微任务队列
-void execute_microtask_timer(JSContext *ctx)
+static void execute_microtask_timer(JSContext *ctx)
 {
   if (!ctx)
   {
@@ -266,7 +266,7 @@ void execute_microtask_timer(JSContext *ctx)
 }
 
 // 释放定时器资源
-void close_timer_callback(uv_handle_t *handle)
+static void close_timer_callback(uv_handle_t *handle)
 {
   if (!handle || !handle->data)
   {
@@ -311,7 +311,7 @@ void close_timer_callback(uv_handle_t *handle)
 }
 
 // 定时器回调函数
-void timer_callback(uv_timer_t *handle)
+static void timer_callback(uv_timer_t *handle)
 {
   if (!handle || !handle->data)
   {
@@ -928,7 +928,7 @@ void Worker_RequestContextFree(WorkerContext *wctx)
 }
 
 // Get runtime statistics
-void Worker_GetStats(WorkerRuntime *wrt, WorkerRuntimeStats *stats)
+void Worker_GetRuntimeStats(WorkerRuntime *wrt, WorkerRuntimeStats *stats)
 {
   if (!wrt || !stats)
     return;
