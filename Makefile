@@ -7,7 +7,7 @@ LIBUV_PATH = $(PWD)/deps/uv
 
 CFLAGS = -I$(QUICKJS_PATH) -I$(LIBUV_PATH)/include -Wall -O2
 LDFLAGS = $(QUICKJS_PATH)/libquickjs.a $(LIBUV_PATH)/.libs/libuv.a 
-TEST_LOG_FLAGS = -DWINTERQ_LOG_LEVEL=4
+TEST_LOG_FLAGS = -DWINTERQ_LOG_LEVEL=2
 
 # target
 TARGET = winterq

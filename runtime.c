@@ -192,7 +192,6 @@ void Worker_FreeContext(WorkerContext *wctx)
   wrt->context_count--;
   uv_mutex_unlock(&wrt->context_mutex);
   JS_FreeContext(wctx->js_context);
-  printf("-------JS_FreeContext------\n\n");
   SAFE_FREE(wctx);
 
   // 如果有回调函数，执行回调
