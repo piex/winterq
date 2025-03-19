@@ -1,38 +1,34 @@
 #ifndef WINTERQ_RUNTIME_H
 #define WINTERQ_RUNTIME_H
 
-#include <uv.h>
 #include <quickjs.h>
 #include <stdint.h>
+#include <uv.h>
 
 typedef struct WorkerContext WorkerContext;
 typedef struct WorkerRuntime WorkerRuntime;
 
 // Hash table for timers to allow for faster lookups when clearing
-typedef struct timer_entry
-{
+typedef struct timer_entry {
   int timer_id;
   uv_timer_t *timer;
   struct timer_entry *next;
 } timer_entry;
 
 #define TIMER_TABLE_SIZE 64
-typedef struct
-{
+typedef struct {
   timer_entry *entries[TIMER_TABLE_SIZE];
   uv_mutex_t mutex;
 } timer_table;
 
 // Runtime statistics structure
-typedef struct
-{
+typedef struct {
   int active_contexts;
   int max_contexts;
   int active_timers;
 } WorkerRuntimeStats;
 
-typedef struct WorkerRuntime
-{
+typedef struct WorkerRuntime {
   JSRuntime *js_runtime; // 每个线程一个 JSRuntime
 
   uv_loop_t *loop;          // uv事件循环
@@ -47,8 +43,7 @@ typedef struct WorkerRuntime
   timer_table *timer_table;
 } WorkerRuntime;
 
-typedef struct WorkerContext
-{
+typedef struct WorkerContext {
   JSContext *js_context;
   WorkerRuntime *runtime;
 
@@ -100,7 +95,8 @@ void Worker_FreeContext(WorkerContext *wctx);
  * @param callback_arg 回调函数的参数
  * @return 成功返回 0，失败返回非零值
  */
-int Worker_Eval_JS(WorkerRuntime *wrt, const char *script, void (*callback)(void *), void *callback_arg);
+int Worker_Eval_JS(WorkerRuntime *wrt, const char *script,
+                   void (*callback)(void *), void *callback_arg);
 
 /**
  * 执行 JavaScript Bytecode
@@ -112,7 +108,9 @@ int Worker_Eval_JS(WorkerRuntime *wrt, const char *script, void (*callback)(void
  * @param callback_arg 回调函数的参数
  * @return 成功返回 0，失败返回非零值
  */
-int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode, size_t bytecode_len, void (*callback)(void *), void *callback_arg);
+int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode,
+                         size_t bytecode_len, void (*callback)(void *),
+                         void *callback_arg);
 
 /**
  * 运行事件循环，阻塞直到所有事件处理完毕

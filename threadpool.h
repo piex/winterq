@@ -1,17 +1,16 @@
 #ifndef THREADPOOL_H
 #define THREADPOOL_H
 
-#include <stdbool.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 
 #include "runtime.h"
 
 /**
  * @brief 表示一个将要执行的JavaScript任务
  */
-typedef struct Task
-{
+typedef struct Task {
   int task_id; // 任务唯一 id
 
   // JavaScript源代码或字节码(二选一)
@@ -31,8 +30,7 @@ typedef struct Task
 /**
  * @brief 任务队列节点，用于链表实现的任务队列
  */
-typedef struct TaskNode
-{
+typedef struct TaskNode {
   Task *task;
   struct TaskNode *next;
 } TaskNode;
@@ -40,8 +38,7 @@ typedef struct TaskNode
 /**
  * @brief 线程安全的任务队列
  */
-typedef struct TaskQueue
-{
+typedef struct TaskQueue {
   TaskNode *head;  // 队列头
   TaskNode *tail;  // 队列尾
   int size;        // 队列中任务数量
@@ -54,8 +51,7 @@ typedef struct TaskQueue
 } TaskQueue;
 
 // Thread pool configuration
-typedef struct ThreadPoolConfig
-{
+typedef struct ThreadPoolConfig {
   int thread_count; // 线程数量
   int max_contexts; // 每个运行时的最大上下文数
 
@@ -70,8 +66,7 @@ typedef struct ThreadPoolConfig
 /**
  * @brief 每个工作线程的数据
  */
-typedef struct ThreadData
-{
+typedef struct ThreadData {
   int thread_id;           // 线程ID
   struct ThreadPool *pool; // 所属线程池指针
 
@@ -90,8 +85,7 @@ typedef struct ThreadData
 /**
  * @brief Thread pool statistics
  */
-typedef struct ThreadPoolStats
-{
+typedef struct ThreadPoolStats {
   int active_threads;        // 当前活跃线程数
   int idle_threads;          // 当前空闲线程数
   int queued_tasks;          // 队列中等待的任务数
@@ -104,8 +98,7 @@ typedef struct ThreadPoolStats
 /**
  * @brief 线程池主结构
  */
-typedef struct ThreadPool
-{
+typedef struct ThreadPool {
   pthread_t *threads;      // 线程数组
   ThreadData *thread_data; // 线程数据数组
   int thread_count;        // 线程数
@@ -152,7 +145,8 @@ ThreadPool *init_thread_pool(ThreadPoolConfig config);
  * @param callback_arg 回调函数参数
  * @return 成功返回0，失败返回-1
  */
-int add_script_task_to_pool(ThreadPool *pool, const char *script, void (*callback)(void *), void *callback_arg);
+int add_script_task_to_pool(ThreadPool *pool, const char *script,
+                            void (*callback)(void *), void *callback_arg);
 
 /**
  * @brief 添加字节码任务到线程池
@@ -163,7 +157,9 @@ int add_script_task_to_pool(ThreadPool *pool, const char *script, void (*callbac
  * @param callback_arg 回调函数参数
  * @return 成功返回0，失败返回-1
  */
-int add_bytecode_task_to_pool(ThreadPool *pool, uint8_t *bytecode, size_t bytecode_len, void (*callback)(void *), void *callback_arg);
+int add_bytecode_task_to_pool(ThreadPool *pool, uint8_t *bytecode,
+                              size_t bytecode_len, void (*callback)(void *),
+                              void *callback_arg);
 
 /**
  * @brief 关闭线程池并释放资源
