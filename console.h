@@ -1,8 +1,8 @@
-#ifndef CONSOLE_H
-#define CONSOLE_H
+#ifndef WINTERQ_CONSOLE_H
+#define WINTERQ_CONSOLE_H
 
 #include "quickjs.h"
 
-void js_std_init_console(JSContext *ctx);
+void js_init_console(JSContext *ctx);
 
-#endif // CONSOLE_H
+#endif // WINTERQ_CONSOLE_H

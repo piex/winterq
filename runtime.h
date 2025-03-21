@@ -1,8 +1,9 @@
 #ifndef WINTERQ_RUNTIME_H
 #define WINTERQ_RUNTIME_H
 
-#include <quickjs.h>
 #include <stdint.h>
+
+#include <quickjs.h>
 #include <uv.h>
 
 typedef struct WorkerContext WorkerContext;

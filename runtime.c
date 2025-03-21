@@ -2,6 +2,7 @@
 #include <uv.h>
 
 #include "console.h"
+#include "headers.h"
 #include "log.h"
 #include "runtime.h"
 
@@ -597,7 +598,7 @@ static void remove_timer_from_table(WorkerRuntime *wrt, int timer_id) {
   uv_mutex_unlock(&wrt->timer_table->mutex);
 }
 
-void js_std_init_timer(JSContext *ctx) {
+void js_init_timer(JSContext *ctx) {
   if (!ctx) {
     WINTERQ_LOG_ERROR("NULL context passed to js_std_init_timeout");
     return;
@@ -666,8 +667,9 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt) {
   JS_SetPropertyStr(ctx, global, "________winterq_worker_context________",
                     js_wctx);
 
-  js_std_init_console(ctx);
-  js_std_init_timer(ctx);
+  js_init_console(ctx);
+  js_init_timer(ctx);
+  js_init_headers(ctx);
 
   SAFE_JS_FREEVALUE(ctx, global);
 
