@@ -235,6 +235,20 @@ HeaderNode *find_header(Headers *headers, const char *name) {
   return NULL;
 }
 
+static void headers_append_node_at_last(Headers *headers, HeaderNode *node) {
+  // If the list is empty, make the new node the first one
+  if (headers->headerList == NULL) {
+    headers->headerList = node;
+  } else {
+    // Otherwise, traverse to find the last node and append
+    HeaderNode *current = headers->headerList;
+    while (current->next != NULL) {
+      current = current->next;
+    }
+    current->next = node;
+  }
+}
+
 // 获取 header 值
 char *headers_get(Headers *headers, const char *name) {
   if (!is_valid_header_name(name)) {
@@ -286,14 +300,14 @@ void remove_privileged_no_cors_request_headers(Headers *headers) {
 }
 
 // 添加 header
-void headers_append(Headers *headers, const char *name, const char *value) {
+int headers_append(Headers *headers, const char *name, const char *value) {
   char *normalized = normalize_value(value);
   if (!normalized)
-    return;
+    return 1;
 
   if (!validate_header(headers, name, normalized)) {
     free(normalized);
-    return;
+    return 1;
   }
 
   if (headers->guard == GUARD_REQUEST_NO_CORS) {
@@ -306,7 +320,7 @@ void headers_append(Headers *headers, const char *name, const char *value) {
       temp_value = malloc(len);
       if (!temp_value) {
         free(normalized);
-        return;
+        return 1;
       }
 
       sprintf(temp_value, "%s, %s", existing->value, normalized);
@@ -314,14 +328,14 @@ void headers_append(Headers *headers, const char *name, const char *value) {
       if (!is_no_cors_safelisted_request_header(name, temp_value)) {
         free(temp_value);
         free(normalized);
-        return;
+        return 1;
       }
 
       free(temp_value);
     } else {
       if (!is_no_cors_safelisted_request_header(name, normalized)) {
         free(normalized);
-        return;
+        return 1;
       }
     }
   }
@@ -329,29 +343,32 @@ void headers_append(Headers *headers, const char *name, const char *value) {
   HeaderNode *new_node = malloc(sizeof(HeaderNode));
   if (!new_node) {
     free(normalized);
-    return;
+    return 1;
   }
 
   new_node->name = strdup(name);
   new_node->value = normalized;
-  new_node->next = headers->headerList;
-  headers->headerList = new_node;
+  new_node->next = NULL; // The new node is the last one
+
+  headers_append_node_at_last(headers, new_node);
 
   if (headers->guard == GUARD_REQUEST_NO_CORS) {
     remove_privileged_no_cors_request_headers(headers);
   }
+
+  return 0;
 }
 
 // 删除 header
-void headers_delete(Headers *headers, const char *name) {
+int headers_delete(Headers *headers, const char *name) {
   if (!validate_header(headers, name, "")) {
-    return;
+    return 1;
   }
 
   if (headers->guard == GUARD_REQUEST_NO_CORS &&
       !is_no_cors_safelisted_request_header(name, "") &&
       !is_privileged_no_cors_request_header(name)) {
-    return;
+    return 1;
   }
 
   HeaderNode *current = headers->headerList;
@@ -373,51 +390,87 @@ void headers_delete(Headers *headers, const char *name) {
         remove_privileged_no_cors_request_headers(headers);
       }
 
-      return;
+      return 0;
     }
 
     prev = current;
     current = current->next;
   }
+
+  return 0;
 }
 
 // 设置 header
-void headers_set(Headers *headers, const char *name, const char *value) {
+int headers_set(Headers *headers, const char *name, const char *value) {
   char *normalized = normalize_value(value);
   if (!normalized)
-    return;
+    return 1;
 
   if (!validate_header(headers, name, normalized)) {
     free(normalized);
-    return;
+    return 1;
   }
 
   if (headers->guard == GUARD_REQUEST_NO_CORS &&
       !is_no_cors_safelisted_request_header(name, normalized)) {
     free(normalized);
-    return;
+    return 1;
   }
 
-  HeaderNode *node = find_header(headers, name);
-  if (node) {
-    free(node->value);
-    node->value = normalized;
-  } else {
+  HeaderNode *current = headers->headerList;
+  HeaderNode *prev = NULL;
+  bool existing = false;
+
+  while (current) {
+    if (strcasecmp(current->name, name) == 0) {
+      if (!existing) {
+        existing = true;
+        free(current->value);
+        current->value = normalized;
+
+        prev = current;
+        current = current->next;
+      } else {
+        if (prev) {
+          prev->next = current->next;
+        } else {
+          headers->headerList = current->next;
+        }
+
+        free(current->name);
+        free(current->value);
+        free(current);
+        if (prev) {
+          current = prev->next;
+        } else {
+          current = headers->headerList;
+        }
+      }
+    } else {
+      prev = current;
+      current = current->next;
+    }
+  }
+
+  if (!existing) {
     HeaderNode *new_node = malloc(sizeof(HeaderNode));
     if (!new_node) {
       free(normalized);
-      return;
+      return 1;
     }
 
     new_node->name = strdup(name);
     new_node->value = normalized;
-    new_node->next = headers->headerList;
-    headers->headerList = new_node;
+    new_node->next = NULL;
+
+    headers_append_node_at_last(headers, new_node);
   }
 
   if (headers->guard == GUARD_REQUEST_NO_CORS) {
     remove_privileged_no_cors_request_headers(headers);
   }
+
+  return 0;
 }
 
 // 获取所有 Set-Cookie 头
@@ -532,72 +585,156 @@ static JSValue js_headers_append(JSContext *ctx, JSValueConst this_val,
     return JS_EXCEPTION;
   }
 
-  char *normalized = normalize_value(value);
+  int ret = headers_append(headers, name, value);
+  JS_FreeCString(ctx, name);
   JS_FreeCString(ctx, value);
-  if (!normalized) {
-    JS_FreeCString(ctx, name);
+
+  if (ret != 0) {
     return JS_ThrowOutOfMemory(ctx);
   }
 
-  if (!validate_header(headers, name, normalized)) {
-    JS_FreeCString(ctx, name);
-    free(normalized);
-    return JS_UNDEFINED;
-  }
+  return JS_UNDEFINED;
+}
 
-  if (headers->guard == GUARD_REQUEST_NO_CORS) {
-    HeaderNode *existing = find_header(headers, name);
-    char *temp_value = NULL;
-    if (existing) {
-      size_t len =
-          strlen(existing->value) + strlen(normalized) + 3; // +3 for ", "
-      temp_value = malloc(len);
-      if (!temp_value) {
-        JS_FreeCString(ctx, name);
-        free(normalized);
-        return JS_ThrowOutOfMemory(ctx);
-      }
+// Headers.prototype.delete 方法
+static JSValue js_headers_delete(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+  Headers *headers = get_headers(ctx, this_val);
+  if (!headers)
+    return JS_EXCEPTION;
 
-      sprintf(temp_value, "%s, %s", existing->value, normalized);
+  if (argc < 1)
+    return JS_ThrowTypeError(ctx, "delete requires at least 1 argument");
 
-      if (!is_no_cors_safelisted_request_header(name, temp_value)) {
-        JS_FreeCString(ctx, name);
-        free(temp_value);
-        free(normalized);
-        return JS_UNDEFINED;
-      }
+  const char *name = JS_ToCString(ctx, argv[0]);
+  if (!name)
+    return JS_EXCEPTION;
 
-      free(temp_value);
-    } else {
-      if (!is_no_cors_safelisted_request_header(name, normalized)) {
-        JS_FreeCString(ctx, name);
-        free(normalized);
-        return JS_UNDEFINED;
-      }
-    }
-  }
-  HeaderNode *new_node = malloc(sizeof(HeaderNode));
-  if (!new_node) {
-    JS_FreeCString(ctx, name);
-    free(normalized);
-    return JS_ThrowOutOfMemory(ctx);
-  }
+  headers_delete(headers, name);
 
-  new_node->name = strdup(name);
   JS_FreeCString(ctx, name);
 
-  if (!new_node->name) {
-    free(new_node);
-    free(normalized);
-    return JS_ThrowOutOfMemory(ctx);
+  return JS_UNDEFINED;
+}
+
+// Headers.prototype.get 方法
+static JSValue js_headers_get(JSContext *ctx, JSValueConst this_val, int argc,
+                              JSValueConst *argv) {
+  Headers *headers = get_headers(ctx, this_val);
+  if (!headers)
+    return JS_EXCEPTION;
+
+  if (argc < 1)
+    return JS_ThrowTypeError(ctx, "get requires at least 1 argument");
+
+  const char *name = JS_ToCString(ctx, argv[0]);
+  if (!name)
+    return JS_EXCEPTION;
+
+  if (!is_valid_header_name(name)) {
+    JS_FreeCString(ctx, name);
+    return JS_ThrowTypeError(ctx, "Invalid header name");
   }
 
-  new_node->value = normalized;
-  new_node->next = headers->headerList;
-  headers->headerList = new_node;
+  HeaderNode *current = headers->headerList;
+  char *result = NULL;
+  size_t result_len = 0;
+  bool found = false;
 
-  if (headers->guard == GUARD_REQUEST_NO_CORS) {
-    remove_privileged_no_cors_request_headers(headers);
+  while (current) {
+    if (strcasecmp(current->name, name) == 0) {
+      found = true;
+      if (result == NULL) {
+        result = strdup(current->value);
+        if (!result) {
+          JS_FreeCString(ctx, name);
+          return JS_ThrowOutOfMemory(ctx);
+        }
+        result_len = strlen(result);
+      } else {
+        // Append ", " and the value
+        size_t value_len = strlen(current->value);
+        char *new_result =
+            realloc(result, result_len + 2 + value_len +
+                                1); // +2 for ", " and +1 for null terminator
+
+        if (!new_result) {
+          free(result);
+          JS_FreeCString(ctx, name);
+          return JS_ThrowOutOfMemory(ctx);
+        }
+
+        result = new_result;
+        strcat(result + result_len, ", ");
+        strcat(result + result_len + 2, current->value);
+        result_len += 2 + value_len;
+      }
+    }
+    current = current->next;
+  }
+
+  JS_FreeCString(ctx, name);
+
+  if (!found) {
+    return JS_NULL;
+  }
+
+  JSValue ret = JS_NewString(ctx, result);
+  free(result);
+  return ret;
+}
+
+// Headers.prototype.has 方法
+static JSValue js_headers_has(JSContext *ctx, JSValueConst this_val, int argc,
+                              JSValueConst *argv) {
+  Headers *headers = get_headers(ctx, this_val);
+  if (!headers)
+    return JS_EXCEPTION;
+
+  if (argc < 1)
+    return JS_ThrowTypeError(ctx, "has requires at least 1 argument");
+
+  const char *name = JS_ToCString(ctx, argv[0]);
+  if (!name)
+    return JS_EXCEPTION;
+
+  if (!is_valid_header_name(name)) {
+    JS_FreeCString(ctx, name);
+    return JS_ThrowTypeError(ctx, "Invalid header name");
+  }
+
+  bool has_node = headers_has(headers, name);
+  JS_FreeCString(ctx, name);
+
+  return JS_NewBool(ctx, has_node);
+}
+
+// Headers.prototype.set 方法
+static JSValue js_headers_set(JSContext *ctx, JSValueConst this_val, int argc,
+                              JSValueConst *argv) {
+  Headers *headers = get_headers(ctx, this_val);
+  if (!headers)
+    return JS_EXCEPTION;
+
+  if (argc < 2)
+    return JS_ThrowTypeError(ctx, "set requires at least 2 arguments");
+
+  const char *name = JS_ToCString(ctx, argv[0]);
+  if (!name)
+    return JS_EXCEPTION;
+
+  const char *value = JS_ToCString(ctx, argv[1]);
+  if (!value) {
+    JS_FreeCString(ctx, name);
+    return JS_EXCEPTION;
+  }
+
+  int ret = headers_set(headers, name, value);
+  JS_FreeCString(ctx, name);
+  JS_FreeCString(ctx, value);
+
+  if (ret != 0) {
+    return JS_ThrowOutOfMemory(ctx);
   }
 
   return JS_UNDEFINED;
@@ -805,6 +942,41 @@ static bool fill_headers_from_init(JSContext *ctx, Headers *headers,
   return true;
 }
 
+// static JSValue js_create_headers_iterator(JSContext *ctx, HeaderNode *first)
+// {
+//   JSValue iterator = JS_NewObjectClass(ctx, js_headers_class_id + 1);
+//   if (JS_IsException(iterator))
+//     return iterator;
+
+//   HeadersIterator *data = js_mallocz(ctx, sizeof(HeadersIterator));
+//   if (!data) {
+//     JS_FreeValue(ctx, iterator);
+//     return JS_EXCEPTION;
+//   }
+
+//   data->current = first;
+//   JS_SetOpaque(iterator, data);
+
+//   JSValue iterProto = JS_GetPropertyStr(ctx, iterator, "prototype");
+//   if (!JS_IsException(iterProto)) {
+//     JS_SetPropertyStr(ctx, iterProto, Symbol_toStringTag,
+//                       JS_NewString(ctx, "Headers Iterator"));
+//     JS_FreeValue(ctx, iterProto);
+//   }
+
+//   return iterator;
+// }
+
+// // Headers 对象的 Symbol.iterator 方法
+// static JSValue js_headers_iterator(JSContext *ctx, JSValueConst this_val,
+//                                    int argc, JSValueConst *argv) {
+//   Headers *headers = get_headers(ctx, this_val);
+//   if (!headers)
+//     return JS_EXCEPTION;
+
+//   return js_create_headers_iterator(ctx, headers->headerList);
+// }
+
 // Headers 构造函数
 static JSValue headers_constructor(JSContext *ctx, JSValueConst new_target,
                                    int argc, JSValueConst *argv) {
@@ -893,11 +1065,11 @@ static const JSClassDef js_headers_class = {
 // 定义 Headers 的方法列表
 static const JSCFunctionListEntry js_headers_proto_funcs[] = {
     JS_CFUNC_DEF("append", 2, js_headers_append),
-    // JS_CFUNC_DEF("delete", 1, js_headers_delete),
-    // JS_CFUNC_DEF("get", 1, js_headers_get),
+    JS_CFUNC_DEF("delete", 1, js_headers_delete),
+    JS_CFUNC_DEF("get", 1, js_headers_get),
     // JS_CFUNC_DEF("getSetCookie", 0, js_headers_get_set_cookie),
-    // JS_CFUNC_DEF("has", 1, js_headers_has),
-    // JS_CFUNC_DEF("set", 2, js_headers_set),
+    JS_CFUNC_DEF("has", 1, js_headers_has),
+    JS_CFUNC_DEF("set", 2, js_headers_set),
     // JS_CFUNC_DEF("forEach", 1, js_headers_foreach),
     // JS_CFUNC_DEF("entries", 0, js_headers_entries),
     // JS_CFUNC_DEF("keys", 0, js_headers_keys),
