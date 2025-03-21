@@ -1,3 +1,4 @@
+console.log("---- test8.js ----");
 function assert(b, str) {
 	if (b) {
 		return;
@@ -32,10 +33,19 @@ assert(h.has('Content-Type') === false);
 
 h.set("Accept-Encoding", "br");
 
-console.log('----------start----------');
-console.log(h.get("Accept-Encoding"));
-console.log('===========end===========');
-
 assert(h.get("Accept-Encoding") === "br");
 
-console.info('------test 8 end-----------');
+const h2 = new Headers({
+  "Set-Cookie": "name1=value1",
+});
+
+h2.append("Set-Cookie", "name2=value2");
+
+const cookies = h2.getSetCookie();
+
+assert(Array.isArray(cookies));
+assert(cookies.length === 2);
+assert(cookies[0] === "name1=value1");
+assert(cookies[1] === "name2=value2");
+
+console.log("---- test8.js end----");

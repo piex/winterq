@@ -684,6 +684,36 @@ static JSValue js_headers_get(JSContext *ctx, JSValueConst this_val, int argc,
   return ret;
 }
 
+// Headers.prototype.getSetCookie 方法
+static JSValue js_headers_get_set_cookie(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv) {
+  Headers *headers = get_headers(ctx, this_val);
+  if (!headers)
+    return JS_EXCEPTION;
+
+  JSValue result = JS_NewArray(ctx);
+  if (JS_IsException(result))
+    return result;
+
+  HeaderNode *current = headers->headerList;
+  int index = 0;
+
+  while (current) {
+    if (strcasecmp(current->name, "Set-Cookie") == 0) {
+      JSValue cookie = JS_NewString(ctx, current->value);
+      if (JS_IsException(cookie)) {
+        JS_FreeValue(ctx, result);
+        return cookie;
+      }
+
+      JS_SetPropertyUint32(ctx, result, index++, cookie);
+    }
+    current = current->next;
+  }
+
+  return result;
+}
+
 // Headers.prototype.has 方法
 static JSValue js_headers_has(JSContext *ctx, JSValueConst this_val, int argc,
                               JSValueConst *argv) {
@@ -1067,7 +1097,7 @@ static const JSCFunctionListEntry js_headers_proto_funcs[] = {
     JS_CFUNC_DEF("append", 2, js_headers_append),
     JS_CFUNC_DEF("delete", 1, js_headers_delete),
     JS_CFUNC_DEF("get", 1, js_headers_get),
-    // JS_CFUNC_DEF("getSetCookie", 0, js_headers_get_set_cookie),
+    JS_CFUNC_DEF("getSetCookie", 0, js_headers_get_set_cookie),
     JS_CFUNC_DEF("has", 1, js_headers_has),
     JS_CFUNC_DEF("set", 2, js_headers_set),
     // JS_CFUNC_DEF("forEach", 1, js_headers_foreach),
