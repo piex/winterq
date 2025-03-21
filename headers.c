@@ -235,7 +235,8 @@ HeaderNode *find_header(Headers *headers, const char *name) {
   return NULL;
 }
 
-static void headers_append_node_at_last(Headers *headers, HeaderNode *node) {
+// 将节点追加到链表末尾
+static void headers_append_node(Headers *headers, HeaderNode *node) {
   // If the list is empty, make the new node the first one
   if (headers->headerList == NULL) {
     headers->headerList = node;
@@ -251,6 +252,9 @@ static void headers_append_node_at_last(Headers *headers, HeaderNode *node) {
 
 // 获取 header 值
 char *headers_get(Headers *headers, const char *name) {
+  if (!headers || !name)
+    return NULL;
+
   if (!is_valid_header_name(name)) {
     return NULL; // 应该抛出 TypeError
   }
@@ -261,6 +265,177 @@ char *headers_get(Headers *headers, const char *name) {
   }
 
   return strdup(node->value);
+}
+
+// 获取 header 值
+char **headers_get_values_by_name(Headers *headers, const char *name,
+                                  int *count) {
+  if (!headers || !name || !count)
+    return NULL;
+
+  if (!is_valid_header_name(name)) {
+    return NULL; // 应该抛出 TypeError
+  }
+
+  *count = 0;
+  HeaderNode *current = headers->headerList;
+
+  // 第一次遍历计算匹配数量
+  while (current) {
+    if (strcmp(current->name, name) == 0) {
+      (*count)++;
+    }
+    current = current->next;
+  }
+
+  if (*count == 0)
+    return NULL;
+
+  // 分配结果数组
+  char **values = (char **)malloc(sizeof(char *) * (*count));
+  if (!values) {
+    *count = 0;
+    return NULL;
+  }
+
+  // 第二次遍历填充结果
+  current = headers->headerList;
+  int index = 0;
+  while (current && index < *count) {
+    if (strcmp(current->name, name) == 0) {
+      values[index++] = strdup(current->value);
+    }
+    current = current->next;
+  }
+
+  return values;
+}
+
+char *headers_get_combined_value_by_name(Headers *headers, const char *name) {
+  if (!headers || !name)
+    return NULL;
+
+  if (!is_valid_header_name(name)) {
+    return NULL; // 应该抛出 TypeError
+  }
+
+  HeaderNode *current = headers->headerList;
+  char *result = NULL;
+  size_t result_len = 0;
+
+  while (current) {
+    if (strcasecmp(current->name, name) == 0) {
+      if (result == NULL) {
+        result = strdup(current->value);
+        if (!result) {
+          return NULL;
+        }
+        result_len = strlen(result);
+      } else {
+        // Append ", " and the value
+        size_t value_len = strlen(current->value);
+        char *new_result =
+            realloc(result, result_len + 2 + value_len +
+                                1); // +2 for ", " and +1 for null terminator
+
+        if (!new_result) {
+          free(result);
+          return NULL;
+        }
+
+        result = new_result;
+        strcat(result + result_len, ", ");
+        strcat(result + result_len + 2, current->value);
+        result_len += 2 + value_len;
+      }
+    }
+    current = current->next;
+  }
+
+  return result;
+}
+
+// 获取所有不同的 header names
+char **headers_get_all_names(Headers *headers, int *count) {
+  if (!headers || !count)
+    return NULL;
+
+  *count = 0;
+  if (!headers->headerList)
+    return NULL;
+
+  // 临时数组用于跟踪已经处理过的名称
+  // 先计算链表长度作为最大可能的不同名称数量
+  int maxNames = 0;
+  HeaderNode *temp = headers->headerList;
+  while (temp) {
+    maxNames++;
+    temp = temp->next;
+  }
+
+  char **tempNames = (char **)malloc(sizeof(char *) * maxNames);
+  if (!tempNames)
+    return NULL;
+
+  // 遍历链表，收集唯一的名称
+  HeaderNode *current = headers->headerList;
+  while (current) {
+    int found = 0;
+    // 检查名称是否已在列表中
+    for (int i = 0; i < *count; i++) {
+      if (strcmp(tempNames[i], current->name) == 0) {
+        found = 1;
+        break;
+      }
+    }
+
+    // 如果是新名称，添加到列表
+    if (!found) {
+      tempNames[*count] = strdup(current->name);
+      (*count)++;
+    }
+
+    current = current->next;
+  }
+
+  // 如果没有找到名称
+  if (*count == 0) {
+    free(tempNames);
+    return NULL;
+  }
+
+  // 创建最终结果数组（正确大小）
+  char **names = (char **)malloc(sizeof(char *) * (*count));
+  if (!names) {
+    // 清理临时数组
+    for (int i = 0; i < *count; i++) {
+      free(tempNames[i]);
+    }
+    free(tempNames);
+    *count = 0;
+    return NULL;
+  }
+
+  // 复制到最终数组
+  for (int i = 0; i < *count; i++) {
+    names[i] = tempNames[i];
+  }
+
+  // 释放临时数组（但不释放字符串内容，因为已转移到结果数组）
+  free(tempNames);
+
+  return names;
+}
+
+// 在使用完毕后释放名称数组
+void free_names_array(char **names, int count) {
+  if (!names)
+    return;
+
+  for (int i = 0; i < count; i++) {
+    free(names[i]);
+  }
+  free(names);
 }
 
 // 检查 header 是否存在
@@ -350,7 +525,7 @@ int headers_append(Headers *headers, const char *name, const char *value) {
   new_node->value = normalized;
   new_node->next = NULL; // The new node is the last one
 
-  headers_append_node_at_last(headers, new_node);
+  headers_append_node(headers, new_node);
 
   if (headers->guard == GUARD_REQUEST_NO_CORS) {
     remove_privileged_no_cors_request_headers(headers);
@@ -463,7 +638,7 @@ int headers_set(Headers *headers, const char *name, const char *value) {
     new_node->value = normalized;
     new_node->next = NULL;
 
-    headers_append_node_at_last(headers, new_node);
+    headers_append_node(headers, new_node);
   }
 
   if (headers->guard == GUARD_REQUEST_NO_CORS) {
@@ -636,51 +811,16 @@ static JSValue js_headers_get(JSContext *ctx, JSValueConst this_val, int argc,
     return JS_ThrowTypeError(ctx, "Invalid header name");
   }
 
-  HeaderNode *current = headers->headerList;
-  char *result = NULL;
-  size_t result_len = 0;
-  bool found = false;
-
-  while (current) {
-    if (strcasecmp(current->name, name) == 0) {
-      found = true;
-      if (result == NULL) {
-        result = strdup(current->value);
-        if (!result) {
-          JS_FreeCString(ctx, name);
-          return JS_ThrowOutOfMemory(ctx);
-        }
-        result_len = strlen(result);
-      } else {
-        // Append ", " and the value
-        size_t value_len = strlen(current->value);
-        char *new_result =
-            realloc(result, result_len + 2 + value_len +
-                                1); // +2 for ", " and +1 for null terminator
-
-        if (!new_result) {
-          free(result);
-          JS_FreeCString(ctx, name);
-          return JS_ThrowOutOfMemory(ctx);
-        }
-
-        result = new_result;
-        strcat(result + result_len, ", ");
-        strcat(result + result_len + 2, current->value);
-        result_len += 2 + value_len;
-      }
-    }
-    current = current->next;
-  }
+  char *value = headers_get_combined_value_by_name(headers, name);
 
   JS_FreeCString(ctx, name);
 
-  if (!found) {
+  if (value == NULL) {
     return JS_NULL;
   }
 
-  JSValue ret = JS_NewString(ctx, result);
-  free(result);
+  JSValue ret = JS_NewString(ctx, value);
+  free(value);
   return ret;
 }
 
@@ -765,6 +905,64 @@ static JSValue js_headers_set(JSContext *ctx, JSValueConst this_val, int argc,
 
   if (ret != 0) {
     return JS_ThrowOutOfMemory(ctx);
+  }
+
+  return JS_UNDEFINED;
+}
+
+// Headers.prototype.forEach 方法
+static JSValue js_headers_foreach(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+  Headers *headers = get_headers(ctx, this_val);
+  if (!headers)
+    return JS_EXCEPTION;
+
+  if (argc < 1)
+    return JS_ThrowTypeError(ctx, "forEach requires at least 1 argument");
+
+  JSValueConst callback = argv[0];
+  JSValueConst thisArg = argc > 1 ? argv[1] : JS_UNDEFINED;
+
+  int name_count = 0;
+
+  char **names = headers_get_all_names(headers, &name_count);
+
+  if (!names) {
+    return JS_UNDEFINED;
+  }
+
+  for (int i = 0; i < name_count; i++) {
+    char *value = headers_get_combined_value_by_name(headers, names[i]);
+    if (!value) {
+      return JS_UNDEFINED;
+    }
+
+    JSValue name = JS_NewString(ctx, names[i]);
+    if (JS_IsException(name)) {
+      free(value);
+      return name;
+    }
+
+    JSValue js_value = JS_NewString(ctx, value);
+    if (JS_IsException(js_value)) {
+      free(value);
+      JS_FreeValue(ctx, name);
+      return js_value;
+    }
+
+    JSValue args[3];
+    args[0] = js_value;
+    args[1] = name;
+    args[2] = JS_DupValue(ctx, this_val);
+
+    JSValue ret = JS_Call(ctx, callback, thisArg, 3, args);
+
+    JS_FreeValue(ctx, name);
+    JS_FreeValue(ctx, js_value);
+    JS_FreeValue(ctx, args[2]);
+
+    if (JS_IsException(ret))
+      return ret;
   }
 
   return JS_UNDEFINED;
@@ -1100,7 +1298,7 @@ static const JSCFunctionListEntry js_headers_proto_funcs[] = {
     JS_CFUNC_DEF("getSetCookie", 0, js_headers_get_set_cookie),
     JS_CFUNC_DEF("has", 1, js_headers_has),
     JS_CFUNC_DEF("set", 2, js_headers_set),
-    // JS_CFUNC_DEF("forEach", 1, js_headers_foreach),
+    JS_CFUNC_DEF("forEach", 1, js_headers_foreach),
     // JS_CFUNC_DEF("entries", 0, js_headers_entries),
     // JS_CFUNC_DEF("keys", 0, js_headers_keys),
     // JS_CFUNC_DEF("values", 0, js_headers_values),
@@ -1144,7 +1342,6 @@ void js_init_headers(JSContext *ctx) {
                                    JS_CFUNC_constructor, 0);
 
   JS_SetConstructor(ctx, headers_class, headers_proto);
-  // JS_SetPropertyStr(ctx, headers_class, "prototype", headers_proto);
   JS_SetClassProto(ctx, js_headers_class_id, headers_proto);
 
   // 创建 Headers Iterator 原型
