@@ -6,7 +6,7 @@
 
 - [ ] `fetch()`
 - [ ] `Request` / `Response`
-- [ ] `Headers`
+- [x] `Headers`
 - [ ] `URL` / `URLSearchParams`
 
 ## Streams & Encoding
