@@ -31,6 +31,11 @@ clean:
 
 test_runtime:
 	$(CC) $(CFLAGS) -o test_runtime ./tests/test_runtime.c $(LDFLAGS) ${TEST_LOG_FLAGS} &&  \
+	./test_runtime ${FILE} && \
+	rm -rf ./test_runtime
+
+test_runtime_all:
+	$(CC) $(CFLAGS) -o test_runtime ./tests/test_runtime.c $(LDFLAGS) ${TEST_LOG_FLAGS} &&  \
 	./test_runtime \
 		./tests/test1.js \
 		./tests/test2.js \

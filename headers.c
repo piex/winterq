@@ -6,25 +6,29 @@
 
 #include <quickjs.h>
 
+#include "cutils.h"
 #include "headers.h"
-// #include "log.h"
 
 static JSClassID js_headers_class_id = 0;
-static JSValue headers_constructor(JSContext *ctx, JSValueConst new_target,
-                                   int argc, JSValueConst *argv);
+static JSClassID js_headers_iterator_class_id = 0;
+
+typedef enum JSIteratorKindEnum {
+  JS_ITERATOR_KIND_KEY,
+  JS_ITERATOR_KIND_VALUE,
+  JS_ITERATOR_KIND_KEY_AND_VALUE,
+} JSIteratorKindEnum;
+
+// 迭代器结构
+typedef struct {
+  JSValue obj;
+  JSIteratorKindEnum kind;
+
+  HeaderNode *current;
+} HeadersIterator;
+
+static JSValue js_headers_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv);
 static void js_headers_finalizer(JSRuntime *rt, JSValue val);
-
-// 工具函数：转换为小写
-static char *to_lowercase(const char *str) {
-  if (!str)
-    return NULL;
-
-  char *result = strdup(str);
-  for (int i = 0; result[i]; i++) {
-    result[i] = tolower(result[i]);
-  }
-  return result;
-}
+static void js_headers_iterator_finalizer(JSRuntime *rt, JSValue val);
 
 // 检查字符串是否为有效的 header 名称
 static bool is_valid_header_name(const char *name) {
@@ -134,8 +138,7 @@ bool is_forbidden_response_header(const char *name) {
 
 // 检查是否为 no-CORS 安全的请求头
 bool is_no_cors_safelisted_request_header(const char *name, const char *value) {
-  static const char *safelisted[] = {"accept", "accept-language",
-                                     "content-language", "content-type", NULL};
+  static const char *safelisted[] = {"accept", "accept-language", "content-language", "content-type", NULL};
 
   char *lower_name = to_lowercase(name);
   if (!lower_name)
@@ -156,9 +159,7 @@ bool is_no_cors_safelisted_request_header(const char *name, const char *value) {
 
   // 对 content-type 进行特殊处理
   if (strcasecmp(name, "content-type") == 0) {
-    static const char *allowed_types[] = {"application/x-www-form-urlencoded",
-                                          "multipart/form-data", "text/plain",
-                                          NULL};
+    static const char *allowed_types[] = {"application/x-www-form-urlencoded", "multipart/form-data", "text/plain", NULL};
 
     for (int i = 0; allowed_types[i]; i++) {
       if (strcasecmp(value, allowed_types[i]) == 0) {
@@ -235,18 +236,54 @@ HeaderNode *find_header(Headers *headers, const char *name) {
   return NULL;
 }
 
-// 将节点追加到链表末尾
+// 将节点追加到链表中
 static void headers_append_node(Headers *headers, HeaderNode *node) {
   // If the list is empty, make the new node the first one
   if (headers->headerList == NULL) {
     headers->headerList = node;
-  } else {
-    // Otherwise, traverse to find the last node and append
-    HeaderNode *current = headers->headerList;
-    while (current->next != NULL) {
-      current = current->next;
+    node->next = NULL;
+    return;
+  }
+
+  // Otherwise, traverse to find the last node and append
+  HeaderNode *current = headers->headerList;
+  HeaderNode *prev = NULL;
+  HeaderNode *lastSameName = NULL;
+
+  // First, check if we have any nodes with the same name
+  // and find the last one if exists
+  while (current != NULL) {
+    if (strcasecmp(current->name, node->name) == 0) {
+      lastSameName = current;
     }
-    current->next = node;
+    current = current->next;
+  }
+
+  // If we found nodes with the same name, insert after the last one
+  if (lastSameName != NULL) {
+    node->next = lastSameName->next;
+    lastSameName->next = node;
+    return;
+  }
+
+  // If no nodes with the same name, insert in alphabetical order
+  current = headers->headerList;
+  prev = NULL;
+
+  // Find position to insert based on case-insensitive alphabetical order
+  while (current != NULL && strcasecmp(current->name, node->name) < 0) {
+    prev = current;
+    current = current->next;
+  }
+
+  // Insert at beginning if it should be first
+  if (prev == NULL) {
+    node->next = headers->headerList;
+    headers->headerList = node;
+  } else {
+    // Insert in the middle or at the end
+    node->next = current;
+    prev->next = node;
   }
 }
 
@@ -265,94 +302,6 @@ char *headers_get(Headers *headers, const char *name) {
   }
 
   return strdup(node->value);
-}
-
-// 获取 header 值
-char **headers_get_values_by_name(Headers *headers, const char *name,
-                                  int *count) {
-  if (!headers || !name || !count)
-    return NULL;
-
-  if (!is_valid_header_name(name)) {
-    return NULL; // 应该抛出 TypeError
-  }
-
-  *count = 0;
-  HeaderNode *current = headers->headerList;
-
-  // 第一次遍历计算匹配数量
-  while (current) {
-    if (strcmp(current->name, name) == 0) {
-      (*count)++;
-    }
-    current = current->next;
-  }
-
-  if (*count == 0)
-    return NULL;
-
-  // 分配结果数组
-  char **values = (char **)malloc(sizeof(char *) * (*count));
-  if (!values) {
-    *count = 0;
-    return NULL;
-  }
-
-  // 第二次遍历填充结果
-  current = headers->headerList;
-  int index = 0;
-  while (current && index < *count) {
-    if (strcmp(current->name, name) == 0) {
-      values[index++] = strdup(current->value);
-    }
-    current = current->next;
-  }
-
-  return values;
-}
-
-char *headers_get_combined_value_by_name(Headers *headers, const char *name) {
-  if (!headers || !name)
-    return NULL;
-
-  if (!is_valid_header_name(name)) {
-    return NULL; // 应该抛出 TypeError
-  }
-
-  HeaderNode *current = headers->headerList;
-  char *result = NULL;
-  size_t result_len = 0;
-
-  while (current) {
-    if (strcasecmp(current->name, name) == 0) {
-      if (result == NULL) {
-        result = strdup(current->value);
-        if (!result) {
-          return NULL;
-        }
-        result_len = strlen(result);
-      } else {
-        // Append ", " and the value
-        size_t value_len = strlen(current->value);
-        char *new_result =
-            realloc(result, result_len + 2 + value_len +
-                                1); // +2 for ", " and +1 for null terminator
-
-        if (!new_result) {
-          free(result);
-          return NULL;
-        }
-
-        result = new_result;
-        strcat(result + result_len, ", ");
-        strcat(result + result_len + 2, current->value);
-        result_len += 2 + value_len;
-      }
-    }
-    current = current->next;
-  }
-
-  return result;
 }
 
 // 获取所有不同的 header names
@@ -427,6 +376,91 @@ char **headers_get_all_names(Headers *headers, int *count) {
   return names;
 }
 
+// 获取 header 值
+char **headers_get_values_by_name(Headers *headers, const char *name, int *count) {
+  if (!headers || !name || !count)
+    return NULL;
+
+  if (!is_valid_header_name(name)) {
+    return NULL; // 应该抛出 TypeError
+  }
+
+  *count = 0;
+  HeaderNode *current = headers->headerList;
+
+  // 第一次遍历计算匹配数量
+  while (current) {
+    if (strcmp(current->name, name) == 0) {
+      (*count)++;
+    }
+    current = current->next;
+  }
+
+  if (*count == 0)
+    return NULL;
+
+  // 分配结果数组
+  char **values = (char **)malloc(sizeof(char *) * (*count));
+  if (!values) {
+    *count = 0;
+    return NULL;
+  }
+
+  // 第二次遍历填充结果
+  current = headers->headerList;
+  int index = 0;
+  while (current && index < *count) {
+    if (strcmp(current->name, name) == 0) {
+      values[index++] = strdup(current->value);
+    }
+    current = current->next;
+  }
+
+  return values;
+}
+
+char *headers_get_combined_value_by_name(Headers *headers, const char *name) {
+  if (!headers || !name)
+    return NULL;
+
+  if (!is_valid_header_name(name)) {
+    return NULL; // 应该抛出 TypeError
+  }
+
+  HeaderNode *current = headers->headerList;
+  char *result = NULL;
+  size_t result_len = 0;
+
+  while (current) {
+    if (strcasecmp(current->name, name) == 0) {
+      if (result == NULL) {
+        result = strdup(current->value);
+        if (!result) {
+          return NULL;
+        }
+        result_len = strlen(result);
+      } else {
+        // Append ", " and the value
+        size_t value_len = strlen(current->value);
+        char *new_result = realloc(result, result_len + 2 + value_len + 1); // +2 for ", " and +1 for null terminator
+
+        if (!new_result) {
+          free(result);
+          return NULL;
+        }
+
+        result = new_result;
+        strcat(result + result_len, ", ");
+        strcat(result + result_len + 2, current->value);
+        result_len += 2 + value_len;
+      }
+    }
+    current = current->next;
+  }
+
+  return result;
+}
+
 // 在使用完毕后释放名称数组
 void free_names_array(char **names, int count) {
   if (!names)
@@ -490,8 +524,7 @@ int headers_append(Headers *headers, const char *name, const char *value) {
     char *temp_value = NULL;
 
     if (existing) {
-      size_t len =
-          strlen(existing->value) + strlen(normalized) + 3; // +3 for ", "
+      size_t len = strlen(existing->value) + strlen(normalized) + 3; // +3 for ", "
       temp_value = malloc(len);
       if (!temp_value) {
         free(normalized);
@@ -540,9 +573,7 @@ int headers_delete(Headers *headers, const char *name) {
     return 1;
   }
 
-  if (headers->guard == GUARD_REQUEST_NO_CORS &&
-      !is_no_cors_safelisted_request_header(name, "") &&
-      !is_privileged_no_cors_request_header(name)) {
+  if (headers->guard == GUARD_REQUEST_NO_CORS && !is_no_cors_safelisted_request_header(name, "") && !is_privileged_no_cors_request_header(name)) {
     return 1;
   }
 
@@ -586,8 +617,7 @@ int headers_set(Headers *headers, const char *name, const char *value) {
     return 1;
   }
 
-  if (headers->guard == GUARD_REQUEST_NO_CORS &&
-      !is_no_cors_safelisted_request_header(name, normalized)) {
+  if (headers->guard == GUARD_REQUEST_NO_CORS && !is_no_cors_safelisted_request_header(name, normalized)) {
     free(normalized);
     return 1;
   }
@@ -707,41 +737,11 @@ void headers_free(Headers *headers) {
   free(headers);
 }
 
-// 创建迭代器
-HeadersIterator *headers_iterator_new(Headers *headers) {
-  HeadersIterator *iterator = malloc(sizeof(HeadersIterator));
-  if (!iterator)
-    return NULL;
-
-  iterator->current = headers->headerList;
-  return iterator;
-}
-
-// 获取下一个键值对
-bool headers_iterator_next(HeadersIterator *iterator, char **name,
-                           char **value) {
-  if (!iterator->current) {
-    return false;
-  }
-
-  *name = strdup(iterator->current->name);
-  *value = strdup(iterator->current->value);
-  iterator->current = iterator->current->next;
-
-  return true;
-}
-
-// 清理迭代器
-void headers_iterator_free(HeadersIterator *iterator) { free(iterator); }
-
 // 从 JS 值中获取 Headers 数据
-static Headers *get_headers(JSContext *ctx, JSValueConst this_val) {
-  return JS_GetOpaque2(ctx, this_val, js_headers_class_id);
-}
+static Headers *get_headers(JSContext *ctx, JSValueConst this_val) { return JS_GetOpaque2(ctx, this_val, js_headers_class_id); }
 
 // Headers.prototype.append 方法
-static JSValue js_headers_append(JSContext *ctx, JSValueConst this_val,
-                                 int argc, JSValueConst *argv) {
+static JSValue js_headers_append(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   Headers *headers = get_headers(ctx, this_val);
   if (!headers)
     return JS_EXCEPTION;
@@ -772,8 +772,7 @@ static JSValue js_headers_append(JSContext *ctx, JSValueConst this_val,
 }
 
 // Headers.prototype.delete 方法
-static JSValue js_headers_delete(JSContext *ctx, JSValueConst this_val,
-                                 int argc, JSValueConst *argv) {
+static JSValue js_headers_delete(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   Headers *headers = get_headers(ctx, this_val);
   if (!headers)
     return JS_EXCEPTION;
@@ -793,8 +792,7 @@ static JSValue js_headers_delete(JSContext *ctx, JSValueConst this_val,
 }
 
 // Headers.prototype.get 方法
-static JSValue js_headers_get(JSContext *ctx, JSValueConst this_val, int argc,
-                              JSValueConst *argv) {
+static JSValue js_headers_get(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   Headers *headers = get_headers(ctx, this_val);
   if (!headers)
     return JS_EXCEPTION;
@@ -825,8 +823,7 @@ static JSValue js_headers_get(JSContext *ctx, JSValueConst this_val, int argc,
 }
 
 // Headers.prototype.getSetCookie 方法
-static JSValue js_headers_get_set_cookie(JSContext *ctx, JSValueConst this_val,
-                                         int argc, JSValueConst *argv) {
+static JSValue js_headers_get_set_cookie(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   Headers *headers = get_headers(ctx, this_val);
   if (!headers)
     return JS_EXCEPTION;
@@ -855,8 +852,7 @@ static JSValue js_headers_get_set_cookie(JSContext *ctx, JSValueConst this_val,
 }
 
 // Headers.prototype.has 方法
-static JSValue js_headers_has(JSContext *ctx, JSValueConst this_val, int argc,
-                              JSValueConst *argv) {
+static JSValue js_headers_has(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   Headers *headers = get_headers(ctx, this_val);
   if (!headers)
     return JS_EXCEPTION;
@@ -880,8 +876,7 @@ static JSValue js_headers_has(JSContext *ctx, JSValueConst this_val, int argc,
 }
 
 // Headers.prototype.set 方法
-static JSValue js_headers_set(JSContext *ctx, JSValueConst this_val, int argc,
-                              JSValueConst *argv) {
+static JSValue js_headers_set(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   Headers *headers = get_headers(ctx, this_val);
   if (!headers)
     return JS_EXCEPTION;
@@ -911,8 +906,7 @@ static JSValue js_headers_set(JSContext *ctx, JSValueConst this_val, int argc,
 }
 
 // Headers.prototype.forEach 方法
-static JSValue js_headers_foreach(JSContext *ctx, JSValueConst this_val,
-                                  int argc, JSValueConst *argv) {
+static JSValue js_headers_foreach(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   Headers *headers = get_headers(ctx, this_val);
   if (!headers)
     return JS_EXCEPTION;
@@ -968,9 +962,101 @@ static JSValue js_headers_foreach(JSContext *ctx, JSValueConst this_val,
   return JS_UNDEFINED;
 }
 
+static JSValue js_create_headers_iterator(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic) {
+  Headers *headers = get_headers(ctx, this_val);
+  if (!headers)
+    return JS_EXCEPTION;
+
+  JSIteratorKindEnum kind;
+  HeadersIterator *hit;
+  JSValue enum_obj;
+
+  kind = magic >> 2;
+
+  enum_obj = JS_NewObjectClass(ctx, js_headers_iterator_class_id);
+  if (JS_IsException(enum_obj))
+    goto fail;
+
+  hit = js_malloc(ctx, sizeof(*hit));
+  if (!hit) {
+    JS_FreeValue(ctx, enum_obj);
+    goto fail;
+  }
+  hit->obj = JS_DupValue(ctx, this_val);
+  hit->kind = kind;
+  hit->current = NULL;
+
+  JS_SetOpaque(enum_obj, hit);
+
+  return enum_obj;
+
+fail:
+  return JS_EXCEPTION;
+}
+
+static JSValue js_create_headers_iterator_iterator(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+  return JS_DupValue(ctx, this_val);
+}
+
+static JSValue js_headers_iterator_next(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int *pdone, int magic) {
+  HeadersIterator *hit;
+  Headers *headers;
+
+  hit = JS_GetOpaque2(ctx, this_val, js_headers_iterator_class_id);
+  if (!hit) {
+    *pdone = false;
+    return JS_EXCEPTION;
+  }
+
+  if (JS_IsUndefined(hit->obj))
+    goto done;
+
+  headers = JS_GetOpaque(hit->obj, js_headers_class_id);
+  if (!headers)
+    return JS_EXCEPTION;
+
+  if (!hit->current) {
+    hit->current = headers->headerList;
+  } else {
+    hit->current = hit->current->next;
+  }
+
+  if (!hit->current) {
+    /* no more record  */
+    hit->current = NULL;
+    JS_FreeValue(ctx, hit->obj);
+    hit->obj = JS_UNDEFINED;
+    goto done;
+  }
+
+  *pdone = false;
+
+  if (hit->kind == JS_ITERATOR_KIND_KEY) {
+
+    return JS_NewString(ctx, hit->current->name);
+  } else {
+    if (hit->kind == JS_ITERATOR_KIND_VALUE) {
+      return JS_NewString(ctx, hit->current->value);
+    } else {
+      JSValue result = JS_NewArray(ctx);
+      if (JS_IsException(result))
+        return JS_EXCEPTION;
+      JS_SetPropertyUint32(ctx, result, 0, JS_NewString(ctx, hit->current->name));
+      JS_SetPropertyUint32(ctx, result, 1, JS_NewString(ctx, hit->current->value));
+      return result;
+    }
+  }
+
+  return JS_UNDEFINED;
+
+done:
+  /* end of enumeration */
+  *pdone = true;
+  return JS_UNDEFINED;
+}
+
 // 处理初始化数据
-static bool fill_headers_from_init(JSContext *ctx, Headers *headers,
-                                   JSValueConst init) {
+static bool fill_headers_from_init(JSContext *ctx, Headers *headers, JSValueConst init) {
   if (JS_IsUndefined(init) || JS_IsNull(init))
     return true;
 
@@ -1062,8 +1148,8 @@ static bool fill_headers_from_init(JSContext *ctx, Headers *headers,
         }
 
         new_node->value = normalized;
-        new_node->next = headers->headerList;
-        headers->headerList = new_node;
+        new_node->next = NULL;
+        headers_append_node(headers, new_node);
       } else {
         JS_FreeCString(ctx, name);
         free(normalized);
@@ -1153,8 +1239,8 @@ static bool fill_headers_from_init(JSContext *ctx, Headers *headers,
         }
 
         new_node->value = normalized;
-        new_node->next = headers->headerList;
-        headers->headerList = new_node;
+        new_node->next = NULL;
+        headers_append_node(headers, new_node);
       } else {
         JS_FreeCString(ctx, name);
         free(normalized);
@@ -1170,44 +1256,8 @@ static bool fill_headers_from_init(JSContext *ctx, Headers *headers,
   return true;
 }
 
-// static JSValue js_create_headers_iterator(JSContext *ctx, HeaderNode *first)
-// {
-//   JSValue iterator = JS_NewObjectClass(ctx, js_headers_class_id + 1);
-//   if (JS_IsException(iterator))
-//     return iterator;
-
-//   HeadersIterator *data = js_mallocz(ctx, sizeof(HeadersIterator));
-//   if (!data) {
-//     JS_FreeValue(ctx, iterator);
-//     return JS_EXCEPTION;
-//   }
-
-//   data->current = first;
-//   JS_SetOpaque(iterator, data);
-
-//   JSValue iterProto = JS_GetPropertyStr(ctx, iterator, "prototype");
-//   if (!JS_IsException(iterProto)) {
-//     JS_SetPropertyStr(ctx, iterProto, Symbol_toStringTag,
-//                       JS_NewString(ctx, "Headers Iterator"));
-//     JS_FreeValue(ctx, iterProto);
-//   }
-
-//   return iterator;
-// }
-
-// // Headers 对象的 Symbol.iterator 方法
-// static JSValue js_headers_iterator(JSContext *ctx, JSValueConst this_val,
-//                                    int argc, JSValueConst *argv) {
-//   Headers *headers = get_headers(ctx, this_val);
-//   if (!headers)
-//     return JS_EXCEPTION;
-
-//   return js_create_headers_iterator(ctx, headers->headerList);
-// }
-
 // Headers 构造函数
-static JSValue headers_constructor(JSContext *ctx, JSValueConst new_target,
-                                   int argc, JSValueConst *argv) {
+static JSValue js_headers_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
   JSValue obj = JS_UNDEFINED;
   Headers *headers = NULL;
 
@@ -1278,17 +1328,19 @@ static const JSClassDef js_headers_class = {
     .finalizer = js_headers_finalizer,
 };
 
-// static void js_headers_iterator_finalizer(JSRuntime *rt, JSValue val) {
-//   HeadersIteratorData *data = JS_GetOpaque(val, js_headers_class_id + 1);
-//   if (data) {
-//     js_free_rt(rt, data);
-//   }
-// }
+static void js_headers_iterator_finalizer(JSRuntime *rt, JSValue val) {
+  HeadersIterator *hit = JS_GetOpaque(val, js_headers_iterator_class_id);
 
-// static const JSClassDef js_headers_iterator_class = {
-//     "HeadersIterator",
-//     .finalizer = js_headers_iterator_finalizer,
-// };
+  if (hit) {
+    JS_FreeValueRT(rt, hit->obj);
+    js_free_rt(rt, hit);
+  }
+}
+
+static const JSClassDef js_headers_iterator_class = {
+    "HeadersIterator",
+    .finalizer = js_headers_iterator_finalizer,
+};
 
 // 定义 Headers 的方法列表
 static const JSCFunctionListEntry js_headers_proto_funcs[] = {
@@ -1299,12 +1351,17 @@ static const JSCFunctionListEntry js_headers_proto_funcs[] = {
     JS_CFUNC_DEF("has", 1, js_headers_has),
     JS_CFUNC_DEF("set", 2, js_headers_set),
     JS_CFUNC_DEF("forEach", 1, js_headers_foreach),
-    // JS_CFUNC_DEF("entries", 0, js_headers_entries),
-    // JS_CFUNC_DEF("keys", 0, js_headers_keys),
-    // JS_CFUNC_DEF("values", 0, js_headers_values),
-    // JS_PROP_STRING_DEF("[Symbol.toStringTag]", "Headers",
-    // JS_PROP_CONFIGURABLE), JS_CFUNC_DEF("[Symbol.iterator]", 0,
-    // js_headers_iterator),
+    JS_CFUNC_MAGIC_DEF("values", 0, js_create_headers_iterator, (JS_ITERATOR_KIND_VALUE << 2) | 0),
+    JS_CFUNC_MAGIC_DEF("keys", 0, js_create_headers_iterator, (JS_ITERATOR_KIND_KEY << 2) | 0),
+    JS_CFUNC_MAGIC_DEF("entries", 0, js_create_headers_iterator, (JS_ITERATOR_KIND_KEY_AND_VALUE << 2) | 0),
+    JS_ALIAS_DEF("[Symbol.iterator]", "entries"),
+    JS_PROP_STRING_DEF("[Symbol.toStringTag]", "Headers", JS_PROP_CONFIGURABLE),
+};
+
+static const JSCFunctionListEntry js_headers_iterator_proto_funcs[] = {
+    JS_ITERATOR_NEXT_DEF("next", 0, js_headers_iterator_next, 0),
+    JS_CFUNC_DEF("[Symbol.iterator]", 0, js_create_headers_iterator_iterator),
+    JS_PROP_STRING_DEF("[Symbol.toStringTag]", "Headers Iterator", JS_PROP_CONFIGURABLE),
 };
 
 // Initialize the class
@@ -1317,53 +1374,26 @@ void js_init_headers(JSContext *ctx) {
   JS_NewClass(JS_GetRuntime(ctx), js_headers_class_id, &js_headers_class);
 
   // 初始化 Iterator 类
-  // JS_NewClassID(&js_headers_class_id + 1);
-  // JS_NewClass(JS_GetRuntime(ctx), js_headers_class_id + 1,
-  //             &js_headers_iterator_class);
-
-  // 初始化 Keys Iterator 类
-  // JS_NewClassID(&js_headers_class_id + 2);
-  // JS_NewClass(JS_GetRuntime(ctx), js_headers_class_id + 2,
-  //             &js_headers_iterator_class);
-
-  // 初始化 Values Iterator 类
-  // JS_NewClassID(&js_headers_class_id + 3);
-  // JS_NewClass(JS_GetRuntime(ctx), js_headers_class_id + 3,
-  //             &js_headers_iterator_class);
+  JS_NewClassID(&js_headers_iterator_class_id);
+  JS_NewClass(JS_GetRuntime(ctx), js_headers_iterator_class_id, &js_headers_iterator_class);
 
   // 创建 Headers 构造函数
   headers_proto = JS_NewObject(ctx);
+
   // 为原型对象添加方法
-  JS_SetPropertyFunctionList(ctx, headers_proto, js_headers_proto_funcs,
-                             countof(js_headers_proto_funcs));
+  JS_SetPropertyFunctionList(ctx, headers_proto, js_headers_proto_funcs, countof(js_headers_proto_funcs));
 
   // Create constructor，创建构造函数
-  headers_class = JS_NewCFunction2(ctx, headers_constructor, "Headers", 1,
-                                   JS_CFUNC_constructor, 0);
+  headers_class = JS_NewCFunction2(ctx, js_headers_constructor, "Headers", 1, JS_CFUNC_constructor, 0);
 
   JS_SetConstructor(ctx, headers_class, headers_proto);
   JS_SetClassProto(ctx, js_headers_class_id, headers_proto);
 
   // 创建 Headers Iterator 原型
-  // JSValue iter_proto = JS_NewObject(ctx);
-  // JS_SetPropertyFunctionList(ctx, iter_proto,
-  // js_headers_iterator_proto_funcs,
-  //                            countof(js_headers_iterator_proto_funcs));
-  // JS_SetClassProto(ctx, js_headers_class_id + 1, iter_proto);
+  JSValue iterator_proto = JS_NewObject(ctx);
 
-  // 创建 Keys Iterator 原型
-  // JSValue keys_iter_proto = JS_NewObject(ctx);
-  // JS_SetPropertyStr(ctx, keys_iter_proto, Symbol_toStringTag,
-  //                   JS_NewString(ctx, "Headers Keys Iterator"));
-  // JS_CFUNC_DEF("next", 0, js_headers_keys_iterator_next);
-  // JS_SetClassProto(ctx, js_headers_class_id + 2, keys_iter_proto);
-
-  // 创建 Values Iterator 原型
-  // JSValue values_iter_proto = JS_NewObject(ctx);
-  // JS_SetPropertyStr(ctx, values_iter_proto, Symbol_toStringTag,
-  //                   JS_NewString(ctx, "Headers Values Iterator"));
-  // JS_CFUNC_DEF("next", 0, js_headers_values_iterator_next);
-  // JS_SetClassProto(ctx, js_headers_class_id + 3, values_iter_proto);
+  JS_SetPropertyFunctionList(ctx, iterator_proto, js_headers_iterator_proto_funcs, countof(js_headers_iterator_proto_funcs));
+  JS_SetClassProto(ctx, js_headers_iterator_class_id, iterator_proto);
 
   JSValue global_obj = JS_GetGlobalObject(ctx);
 

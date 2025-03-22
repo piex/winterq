@@ -4,13 +4,7 @@
 #include "quickjs.h"
 
 // 定义 Headers 保护模式枚举
-typedef enum {
-  GUARD_NONE,
-  GUARD_IMMUTABLE,
-  GUARD_REQUEST,
-  GUARD_REQUEST_NO_CORS,
-  GUARD_RESPONSE
-} HeadersGuard;
+typedef enum { GUARD_NONE, GUARD_IMMUTABLE, GUARD_REQUEST, GUARD_REQUEST_NO_CORS, GUARD_RESPONSE } HeadersGuard;
 
 // 定义单个 header 结构
 typedef struct HeaderNode {
@@ -24,11 +18,6 @@ typedef struct {
   HeaderNode *headerList;
   HeadersGuard guard;
 } Headers;
-
-// 迭代器结构
-typedef struct {
-  HeaderNode *current;
-} HeadersIterator;
 
 void js_init_headers(JSContext *ctx);
 

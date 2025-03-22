@@ -1,3 +1,4 @@
+ColumnLimit: 150
 BraceWrapping:
   AfterFunction: false
   AfterClass: false

@@ -5,6 +5,8 @@
 
 #include "../console.c"
 #include "../console.h"
+#include "../cutils.c"
+#include "../cutils.h"
 #include "../headers.c"
 #include "../runtime.c"
 #include "../runtime.h"
