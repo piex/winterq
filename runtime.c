@@ -3,6 +3,7 @@
 
 #include "log.h"
 #include "mcwp/console.h"
+#include "mcwp/event.h"
 #include "mcwp/headers.h"
 #include "runtime.h"
 
@@ -653,6 +654,7 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt) {
   js_init_console(ctx);
   js_init_timer(ctx);
   js_init_headers(ctx);
+  js_init_event(ctx);
 
   SAFE_JS_FREEVALUE(ctx, global);
 

@@ -7,6 +7,8 @@
 #include "../cutils.h"
 #include "../mcwp/console.c"
 #include "../mcwp/console.h"
+#include "../mcwp/event.c"
+#include "../mcwp/event.h"
 #include "../mcwp/headers.c"
 #include "../mcwp/headers.h"
 #include "../runtime.c"
