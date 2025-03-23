@@ -3,11 +3,12 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../console.c"
-#include "../console.h"
 #include "../cutils.c"
 #include "../cutils.h"
-#include "../headers.c"
+#include "../mcwp/console.c"
+#include "../mcwp/console.h"
+#include "../mcwp/headers.c"
+#include "../mcwp/headers.h"
 #include "../runtime.c"
 #include "../runtime.h"
 #include "./file.c"

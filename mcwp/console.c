@@ -28,16 +28,9 @@ static const ConsoleLogType LOG_TYPES[] = {
     {"DEBUG", ANSI_COLOR_BLUE}   // debug
 };
 
-enum {
-  LOG_TYPE_LOG = 0,
-  LOG_TYPE_INFO,
-  LOG_TYPE_WARN,
-  LOG_TYPE_ERROR,
-  LOG_TYPE_DEBUG
-};
+enum { LOG_TYPE_LOG = 0, LOG_TYPE_INFO, LOG_TYPE_WARN, LOG_TYPE_ERROR, LOG_TYPE_DEBUG };
 
-static JSValue js_console_print(JSContext *ctx, JSValueConst this_val, int argc,
-                                JSValueConst *argv, int log_type) {
+static JSValue js_console_print(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int log_type) {
   const ConsoleLogType *type = &LOG_TYPES[log_type];
   const char *str;
   size_t len;
@@ -46,13 +39,11 @@ static JSValue js_console_print(JSContext *ctx, JSValueConst this_val, int argc,
   size_t offset = 0;
 
   if (type->color) {
-    offset +=
-        snprintf(buffer + offset, buffer_size - offset, "%s", type->color);
+    offset += snprintf(buffer + offset, buffer_size - offset, "%s", type->color);
   }
 
   if (type->prefix) {
-    offset +=
-        snprintf(buffer + offset, buffer_size - offset, "%s: ", type->prefix);
+    offset += snprintf(buffer + offset, buffer_size - offset, "%s: ", type->prefix);
   }
 
   for (int i = 0; i < argc; i++) {
@@ -76,8 +67,7 @@ static JSValue js_console_print(JSContext *ctx, JSValueConst this_val, int argc,
   }
 
   if (type->color) {
-    offset +=
-        snprintf(buffer + offset, buffer_size - offset, "%s", ANSI_COLOR_RESET);
+    offset += snprintf(buffer + offset, buffer_size - offset, "%s", ANSI_COLOR_RESET);
   }
 
   offset += snprintf(buffer + offset, buffer_size - offset, "\n");
@@ -91,28 +81,23 @@ static JSValue js_console_print(JSContext *ctx, JSValueConst this_val, int argc,
 }
 
 // Console method wrappers
-static JSValue js_console_log(JSContext *ctx, JSValueConst this_val, int argc,
-                              JSValueConst *argv) {
+static JSValue js_console_log(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   return js_console_print(ctx, this_val, argc, argv, LOG_TYPE_LOG);
 }
 
-static JSValue js_console_info(JSContext *ctx, JSValueConst this_val, int argc,
-                               JSValueConst *argv) {
+static JSValue js_console_info(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   return js_console_print(ctx, this_val, argc, argv, LOG_TYPE_INFO);
 }
 
-static JSValue js_console_warn(JSContext *ctx, JSValueConst this_val, int argc,
-                               JSValueConst *argv) {
+static JSValue js_console_warn(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   return js_console_print(ctx, this_val, argc, argv, LOG_TYPE_WARN);
 }
 
-static JSValue js_console_error(JSContext *ctx, JSValueConst this_val, int argc,
-                                JSValueConst *argv) {
+static JSValue js_console_error(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   return js_console_print(ctx, this_val, argc, argv, LOG_TYPE_ERROR);
 }
 
-static JSValue js_console_debug(JSContext *ctx, JSValueConst this_val, int argc,
-                                JSValueConst *argv) {
+static JSValue js_console_debug(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   return js_console_print(ctx, this_val, argc, argv, LOG_TYPE_DEBUG);
 }
 
@@ -122,15 +107,13 @@ typedef struct {
   char *label;
 } ConsoleTimer;
 
-static JSValue js_console_time(JSContext *ctx, JSValueConst this_val, int argc,
-                               JSValueConst *argv) {
+static JSValue js_console_time(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   // Implementation for console.time
   // Add timer functionality
   return JS_UNDEFINED;
 }
 
-static JSValue js_console_timeEnd(JSContext *ctx, JSValueConst this_val,
-                                  int argc, JSValueConst *argv) {
+static JSValue js_console_timeEnd(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   // Implementation for console.timeEnd
   // Add timer end functionality
   return JS_UNDEFINED;
@@ -138,20 +121,15 @@ static JSValue js_console_timeEnd(JSContext *ctx, JSValueConst this_val,
 
 void js_init_console(JSContext *ctx) {
   static const JSCFunctionListEntry console_funcs[] = {
-      JS_CFUNC_DEF("log", 1, js_console_log),
-      JS_CFUNC_DEF("info", 1, js_console_info),
-      JS_CFUNC_DEF("warn", 1, js_console_warn),
-      JS_CFUNC_DEF("error", 1, js_console_error),
-      JS_CFUNC_DEF("debug", 1, js_console_debug),
-      JS_CFUNC_DEF("time", 1, js_console_time),
+      JS_CFUNC_DEF("log", 1, js_console_log),         JS_CFUNC_DEF("info", 1, js_console_info),   JS_CFUNC_DEF("warn", 1, js_console_warn),
+      JS_CFUNC_DEF("error", 1, js_console_error),     JS_CFUNC_DEF("debug", 1, js_console_debug), JS_CFUNC_DEF("time", 1, js_console_time),
       JS_CFUNC_DEF("timeEnd", 1, js_console_timeEnd),
   };
 
   JSValue global_obj = JS_GetGlobalObject(ctx);
   JSValue console = JS_NewObject(ctx);
 
-  JS_SetPropertyFunctionList(ctx, console, console_funcs,
-                             countof(console_funcs));
+  JS_SetPropertyFunctionList(ctx, console, console_funcs, countof(console_funcs));
   JS_SetPropertyStr(ctx, global_obj, "console", console);
 
   JS_FreeValue(ctx, global_obj);

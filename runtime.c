@@ -1,9 +1,9 @@
 #include <quickjs.h>
 #include <uv.h>
 
-#include "console.h"
-#include "headers.h"
 #include "log.h"
+#include "mcwp/console.h"
+#include "mcwp/headers.h"
 #include "runtime.h"
 
 #define MAX_MICROTASK_ITERATIONS 1000
@@ -32,8 +32,7 @@ static void execute_microtask_timer(JSContext *ctx);
 static void close_timer_callback(uv_handle_t *handle);
 static void init_timer_table(WorkerRuntime *wrt);
 static void cleanup_timer_table(WorkerRuntime *wrt);
-static void add_timer_to_table(WorkerRuntime *wrt, int timer_id,
-                               uv_timer_t *timer);
+static void add_timer_to_table(WorkerRuntime *wrt, int timer_id, uv_timer_t *timer);
 static uv_timer_t *find_timer_by_id(WorkerRuntime *wrt, int timer_id);
 static void remove_timer_from_table(WorkerRuntime *wrt, int timer_id);
 static void close_all_handles_walk_cb(uv_handle_t *handle, void *arg);
@@ -189,11 +188,9 @@ static WorkerContext *get_worker_context(JSContext *ctx) {
     return NULL;
   }
   JSValue global_obj = JS_GetGlobalObject(ctx);
-  JSValue js_wctx = JS_GetPropertyStr(ctx, global_obj,
-                                      "________winterq_worker_context________");
+  JSValue js_wctx = JS_GetPropertyStr(ctx, global_obj, "________winterq_worker_context________");
   if (JS_IsException(js_wctx) || JS_IsUndefined(js_wctx)) {
-    WINTERQ_LOG_ERROR(
-        "Failed to get ________winterq_worker_context________ property");
+    WINTERQ_LOG_ERROR("Failed to get ________winterq_worker_context________ property");
     SAFE_JS_FREEVALUE(ctx, global_obj);
     return NULL;
   }
@@ -230,8 +227,7 @@ static void execute_microtask_timer(JSContext *ctx) {
   } while (pending_jobs > 0 && count < MAX_MICROTASK_ITERATIONS);
 
   if (count >= MAX_MICROTASK_ITERATIONS && pending_jobs > 0) {
-    WINTERQ_LOG_WARNING("Reached maximum microtask iterations (%d)",
-                        MAX_MICROTASK_ITERATIONS);
+    WINTERQ_LOG_WARNING("Reached maximum microtask iterations (%d)", MAX_MICROTASK_ITERATIONS);
   }
 
   WorkerContext *wctx = get_worker_context(current_ctx);
@@ -334,11 +330,9 @@ static void timer_callback(uv_timer_t *handle) {
 }
 
 // setTimeout 实现
-static JSValue js_set_timer(JSContext *ctx, JSValueConst this_val, int argc,
-                            JSValueConst *argv, int is_interval) {
+static JSValue js_set_timer(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int is_interval) {
   if (argc < 2 || !JS_IsFunction(ctx, argv[0])) {
-    return JS_ThrowTypeError(
-        ctx, "setTimeout/setInterval requires a function and delay");
+    return JS_ThrowTypeError(ctx, "setTimeout/setInterval requires a function and delay");
   }
 
   int delay = 0;
@@ -389,14 +383,12 @@ static JSValue js_set_timer(JSContext *ctx, JSValueConst this_val, int argc,
 }
 
 // setTimeout 实现
-static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val, int argc,
-                             JSValueConst *argv) {
+static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   return js_set_timer(ctx, this_val, argc, argv, 0);
 }
 
 // setInterval 实现
-static JSValue js_setInterval(JSContext *ctx, JSValueConst this_val, int argc,
-                              JSValueConst *argv) {
+static JSValue js_setInterval(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   return js_set_timer(ctx, this_val, argc, argv, 1);
 }
 
@@ -413,8 +405,7 @@ static void clear_timer(WorkerRuntime *wrt, int timer_id) {
 }
 
 // clearTimeout 实现
-static JSValue js_clearTimeout(JSContext *ctx, JSValueConst this_val, int argc,
-                               JSValueConst *argv) {
+static JSValue js_clearTimeout(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   if (argc < 1) {
     return JS_UNDEFINED;
   }
@@ -437,8 +428,7 @@ static JSValue js_clearTimeout(JSContext *ctx, JSValueConst this_val, int argc,
 }
 
 // clearInterval 实现 (same as clearTimeout)
-static JSValue js_clearInterval(JSContext *ctx, JSValueConst this_val, int argc,
-                                JSValueConst *argv) {
+static JSValue js_clearInterval(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
   return js_clearTimeout(ctx, this_val, argc, argv);
 }
 
@@ -454,8 +444,7 @@ static void init_timer_table(WorkerRuntime *wrt) {
 
   int result = uv_mutex_init(&wrt->timer_table->mutex);
   if (result != 0) {
-    WINTERQ_LOG_ERROR("Failed to initialize timer table mutex: %s",
-                      uv_strerror(result));
+    WINTERQ_LOG_ERROR("Failed to initialize timer table mutex: %s", uv_strerror(result));
     SAFE_FREE(wrt->timer_table);
     return;
   }
@@ -490,8 +479,7 @@ static void cleanup_timer_table(WorkerRuntime *wrt) {
   SAFE_FREE(wrt->timer_table);
 }
 
-static void add_timer_to_table(WorkerRuntime *wrt, int timer_id,
-                               uv_timer_t *timer) {
+static void add_timer_to_table(WorkerRuntime *wrt, int timer_id, uv_timer_t *timer) {
   if (!wrt || !wrt->timer_table || !timer)
     return;
 
@@ -605,17 +593,13 @@ void js_init_timer(JSContext *ctx) {
   }
   JSValue global_obj = JS_GetGlobalObject(ctx);
 
-  JS_SetPropertyStr(ctx, global_obj, "setTimeout",
-                    JS_NewCFunction(ctx, js_setTimeout, "setTimeout", 2));
+  JS_SetPropertyStr(ctx, global_obj, "setTimeout", JS_NewCFunction(ctx, js_setTimeout, "setTimeout", 2));
 
-  JS_SetPropertyStr(ctx, global_obj, "clearTimeout",
-                    JS_NewCFunction(ctx, js_clearTimeout, "clearTimeout", 1));
+  JS_SetPropertyStr(ctx, global_obj, "clearTimeout", JS_NewCFunction(ctx, js_clearTimeout, "clearTimeout", 1));
 
-  JS_SetPropertyStr(ctx, global_obj, "setInterval",
-                    JS_NewCFunction(ctx, js_setInterval, "setInterval", 2));
+  JS_SetPropertyStr(ctx, global_obj, "setInterval", JS_NewCFunction(ctx, js_setInterval, "setInterval", 2));
 
-  JS_SetPropertyStr(ctx, global_obj, "clearInterval",
-                    JS_NewCFunction(ctx, js_clearInterval, "clearInterval", 1));
+  JS_SetPropertyStr(ctx, global_obj, "clearInterval", JS_NewCFunction(ctx, js_clearInterval, "clearInterval", 1));
 
   JS_FreeValue(ctx, global_obj);
 }
@@ -664,8 +648,7 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt) {
 
   JSValue js_wctx = JS_NewObjectClass(ctx, js_worker_context_class_id);
   JS_SetOpaque(js_wctx, wctx);
-  JS_SetPropertyStr(ctx, global, "________winterq_worker_context________",
-                    js_wctx);
+  JS_SetPropertyStr(ctx, global, "________winterq_worker_context________", js_wctx);
 
   js_init_console(ctx);
   js_init_timer(ctx);
@@ -676,8 +659,7 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt) {
   return wctx;
 }
 
-int Worker_Eval_JS(WorkerRuntime *wrt, const char *script,
-                   void (*callback)(void *), void *callback_arg) {
+int Worker_Eval_JS(WorkerRuntime *wrt, const char *script, void (*callback)(void *), void *callback_arg) {
   if (!wrt) {
     WINTERQ_LOG_ERROR("NULL runtime passed to Worker_Eval_JS");
     return 1;
@@ -694,8 +676,7 @@ int Worker_Eval_JS(WorkerRuntime *wrt, const char *script,
   wctx->callback = callback;
   wctx->callback_arg = callback_arg;
 
-  JSValue result =
-      JS_Eval(ctx, script, strlen(script), "<input>", JS_EVAL_TYPE_MODULE);
+  JSValue result = JS_Eval(ctx, script, strlen(script), "<input>", JS_EVAL_TYPE_MODULE);
   if (JS_IsException(result)) {
     JSValue exc = JS_GetException(ctx);
     const char *str = JS_ToCString(ctx, exc);
@@ -731,9 +712,7 @@ int Worker_Eval_JS(WorkerRuntime *wrt, const char *script,
   return 0;
 }
 
-int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode,
-                         size_t bytecode_len, void (*callback)(void *),
-                         void *callback_arg) {
+int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode, size_t bytecode_len, void (*callback)(void *), void *callback_arg) {
   if (!wrt) {
     WINTERQ_LOG_ERROR("NULL runtime passed to Worker_Eval_Bytecode");
     return 1;
@@ -756,8 +735,7 @@ int Worker_Eval_Bytecode(WorkerRuntime *wrt, uint8_t *bytecode,
   JSContext *ctx = wctx->js_context;
 
   // Load bytecode
-  JSValue loadedVal =
-      JS_ReadObject(ctx, bytecode, bytecode_len, JS_READ_OBJ_BYTECODE);
+  JSValue loadedVal = JS_ReadObject(ctx, bytecode, bytecode_len, JS_READ_OBJ_BYTECODE);
   if (JS_IsException(loadedVal)) {
     JSValue exc = JS_GetException(ctx);
     const char *str = JS_ToCString(ctx, exc);
