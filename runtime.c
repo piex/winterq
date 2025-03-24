@@ -134,13 +134,11 @@ void Worker_FreeRuntime(WorkerRuntime *wrt) {
       uv_loop_fork(wrt->loop); // This is a hack to force detachment of handles
   }
 
-  if (wrt->js_runtime) {
-    // JSMemoryUsage s;
-    // JS_ComputeMemoryUsage(wrt->js_runtime, &s);
-    // JS_DumpMemoryUsage(stdout, &s, wrt->js_runtime);
-    JS_FreeRuntime(wrt->js_runtime);
-    wrt->js_runtime = NULL;
-  }
+  // JSMemoryUsage s;
+  // JS_ComputeMemoryUsage(wrt->js_runtime, &s);
+  // JS_DumpMemoryUsage(stdout, &s, wrt->js_runtime);
+  JS_FreeRuntime(wrt->js_runtime);
+  wrt->js_runtime = NULL;
   SAFE_FREE(wrt->loop);
   SAFE_FREE(wrt);
 }

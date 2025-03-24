@@ -119,13 +119,17 @@ static JSValue js_console_timeEnd(JSContext *ctx, JSValueConst this_val, int arg
   return JS_UNDEFINED;
 }
 
-void js_init_console(JSContext *ctx) {
-  static const JSCFunctionListEntry console_funcs[] = {
-      JS_CFUNC_DEF("log", 1, js_console_log),         JS_CFUNC_DEF("info", 1, js_console_info),   JS_CFUNC_DEF("warn", 1, js_console_warn),
-      JS_CFUNC_DEF("error", 1, js_console_error),     JS_CFUNC_DEF("debug", 1, js_console_debug), JS_CFUNC_DEF("time", 1, js_console_time),
-      JS_CFUNC_DEF("timeEnd", 1, js_console_timeEnd),
-  };
+static const JSCFunctionListEntry console_funcs[] = {
+    JS_CFUNC_DEF("log", 1, js_console_log),
+    JS_CFUNC_DEF("info", 1, js_console_info),
+    JS_CFUNC_DEF("warn", 1, js_console_warn),
+    JS_CFUNC_DEF("error", 1, js_console_error),
+    JS_CFUNC_DEF("debug", 1, js_console_debug),
+    JS_CFUNC_DEF("time", 1, js_console_time),
+    JS_CFUNC_DEF("timeEnd", 1, js_console_timeEnd),
+};
 
+void js_init_console(JSContext *ctx) {
   JSValue global_obj = JS_GetGlobalObject(ctx);
   JSValue console = JS_NewObject(ctx);
 

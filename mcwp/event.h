@@ -32,6 +32,7 @@ typedef struct {
   JSValue currentTarget;         // 当前目标
   JSValue relatedTarget;         // 相关目标
   char *type;                    // 事件类型
+  bool isCustom;                 // 是否自定义事件
   bool bubbles;                  // 是否冒泡
   bool cancelable;               // 是否可取消
   bool composed;                 // 是否可穿透Shadow DOM
@@ -47,7 +48,7 @@ typedef struct {
 // EventTarget结构
 typedef struct {
   EventListener *listeners; // 监听器链表
-} EventTargetData;
+} EventTarget;
 
 void js_init_event(JSContext *ctx);
 

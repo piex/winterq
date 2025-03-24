@@ -9,3 +9,4 @@ BraceWrapping:
   AfterUnion: false
   BeforeCatch: false
   BeforeElse: false
+BinPackArguments: false
