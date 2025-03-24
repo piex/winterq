@@ -39,7 +39,7 @@ static JSValue js_event_constructor(JSContext *ctx, JSValueConst new_target, int
   bool cancelable = false;
   bool composed = false;
   bool isCustom = magic == 1;
-  JSValue detail = JS_UNDEFINED;
+  JSValue detail = JS_NULL;
 
   if (JS_IsUndefined(new_target))
     return JS_ThrowTypeError(ctx, "Constructor Event requires 'new'");
@@ -74,9 +74,18 @@ static JSValue js_event_constructor(JSContext *ctx, JSValueConst new_target, int
     JS_FreeValue(ctx, composed_val);
 
     JSValue detail_val = JS_GetPropertyStr(ctx, argv[1], "detail");
-    if (!JS_IsException(detail_val) && !JS_IsUndefined(detail_val))
-      detail = detail_val;
-    JS_FreeValue(ctx, detail_val);
+    if (!JS_IsException(detail_val)) {
+      if (JS_IsUndefined(detail_val) || JS_IsNull(detail_val)) {
+        detail = JS_NULL;
+      } else if (JS_IsObject(detail)) {
+        detail = JS_DupValue(ctx, detail_val);
+        JS_FreeValue(ctx, detail_val);
+      } else {
+        detail = detail_val;
+      }
+    } else {
+      JS_FreeValue(ctx, detail_val);
+    }
   }
 
   // 创建Event对象
@@ -91,8 +100,8 @@ static JSValue js_event_constructor(JSContext *ctx, JSValueConst new_target, int
   event->composed = composed;
   event->timeStamp = clock();
   event->eventPhase = EVENT_NONE;
-  event->target = JS_UNDEFINED;
-  event->currentTarget = JS_UNDEFINED;
+  event->target = JS_NULL;
+  event->currentTarget = JS_NULL;
   event->relatedTarget = JS_UNDEFINED;
   event->detail = detail;
   event->isTrusted = false;
@@ -112,7 +121,9 @@ fail:
       free(event->type);
     free(event);
   }
-  JS_FreeValue(ctx, detail);
+  if (!JS_IsNull(detail) || !JS_IsUndefined(detail)) {
+    JS_FreeValue(ctx, detail);
+  }
   JS_FreeValue(ctx, obj);
   return JS_EXCEPTION;
 }
