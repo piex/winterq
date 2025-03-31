@@ -75,17 +75,9 @@ static JSValue js_event_constructor(JSContext *ctx, JSValueConst new_target, int
 
     JSValue detail_val = JS_GetPropertyStr(ctx, argv[1], "detail");
     if (!JS_IsException(detail_val)) {
-      if (JS_IsUndefined(detail_val) || JS_IsNull(detail_val)) {
-        detail = JS_NULL;
-      } else if (JS_IsObject(detail)) {
-        detail = JS_DupValue(ctx, detail_val);
-        JS_FreeValue(ctx, detail_val);
-      } else {
-        detail = detail_val;
-      }
-    } else {
-      JS_FreeValue(ctx, detail_val);
+      detail = JS_DupValue(ctx, detail_val);
     }
+    JS_FreeValue(ctx, detail_val);
   }
 
   // 创建Event对象
@@ -141,6 +133,16 @@ static void js_event_finalizer(JSRuntime *rt, JSValue val) {
     JS_FreeValueRT(rt, event->relatedTarget);
     JS_FreeValueRT(rt, event->detail);
     free(event);
+  }
+}
+
+// GC 标记函数 - 标记我们对象中引用的 JavaScript 值
+static void js_event_gc_mark(JSRuntime *rt, JSValueConst val, JS_MarkFunc *mark_func) {
+  Event *event = get_event(val);
+  if (event) {
+    if (!JS_IsNull(event->target)) {
+      JS_MarkValue(rt, event->target, mark_func);
+    }
   }
 }
 
@@ -222,6 +224,10 @@ static JSValue js_event_target_constructor(JSContext *ctx, JSValueConst new_targ
   JSValue obj;
   EventTarget *target;
 
+  // 检查是否使用了 new 关键字
+  if (JS_IsUndefined(new_target))
+    return JS_ThrowTypeError(ctx, "Constructor EventTarget requires 'new'");
+
   target = calloc(1, sizeof(EventTarget));
   if (!target)
     return JS_EXCEPTION;
@@ -249,7 +255,20 @@ static void js_event_target_finalizer(JSRuntime *rt, JSValue val) {
       free(listener);
       listener = next;
     }
+    target->listeners = NULL;
     free(target);
+  }
+}
+
+// GC 标记函数 - 标记我们对象中引用的 JavaScript 值
+static void js_event_target_gc_mark(JSRuntime *rt, JSValueConst val, JS_MarkFunc *mark_func) {
+  EventTarget *target = JS_GetOpaque(val, js_event_target_class_id);
+  if (target) {
+    EventListener *listener = target->listeners;
+    while (listener) {
+      JS_MarkValue(rt, listener->callback, mark_func);
+      listener = listener->next;
+    }
   }
 }
 
@@ -375,12 +394,10 @@ static JSValue js_event_target_remove_event_listener(JSContext *ctx, JSValueCons
 }
 
 // 调用事件监听器
-static bool invoke_event_listeners(JSContext *ctx, Event *event, EventTarget *target, const char *type) {
+static bool invoke_event_listeners(JSContext *ctx, Event *event, JSValue js_event, EventTarget *target, const char *type) {
   bool prevented = false;
   EventListener *listener = target->listeners;
   EventListener *next;
-
-  JSClassID class_id = event->isCustom ? js_custom_event_class_id : js_event_class_id;
 
   // 创建临时列表，以防在处理过程中监听器被修改
   EventListener *temp_list = NULL;
@@ -403,161 +420,51 @@ static bool invoke_event_listeners(JSContext *ctx, Event *event, EventTarget *ta
     listener = listener->next;
   }
 
-  // 调用捕获阶段监听器
-  event->eventPhase = EVENT_CAPTURING_PHASE;
-  listener = temp_list;
-  while (listener && !event->stopPropagation) {
-    if (listener->capture) {
-      JSValueConst args[1];
-      JSValue global_obj = JS_GetGlobalObject(ctx);
-      JSValue event_obj, result;
-
-      // 设置事件当前目标
-      event->currentTarget = JS_DupValue(ctx, event->target);
-
-      // 创建事件对象传递给监听器
-      event_obj = JS_NewObjectClass(ctx, class_id);
-      JS_SetOpaque(event_obj, event);
-
-      args[0] = event_obj;
-
-      // 调用回调函数
-      if (JS_IsFunction(ctx, listener->callback)) {
-        result = JS_Call(ctx, listener->callback, global_obj, 1, args);
-      } else {
-        JSValue handleEvent = JS_GetPropertyStr(ctx, listener->callback, "handleEvent");
-        if (JS_IsFunction(ctx, handleEvent)) {
-          result = JS_Call(ctx, handleEvent, listener->callback, 1, args);
-          JS_FreeValue(ctx, handleEvent);
-        } else {
-          result = JS_UNDEFINED;
-          JS_FreeValue(ctx, handleEvent);
-        }
-      }
-
-      if (JS_IsException(result)) {
-        JS_GetException(ctx); // 清除异常
-      }
-
-      JS_FreeValue(ctx, result);
-      JS_FreeValue(ctx, event_obj);
-      JS_FreeValue(ctx, global_obj);
-
-      // 检查是否阻止了默认行为
-      if (event->defaultPrevented)
-        prevented = true;
-
-      // 如果设置了立即停止传播，则退出循环
-      if (event->stopImmediatePropagation)
-        break;
-    }
-    listener = listener->next;
-  }
-
   // 目标阶段
-  if (!event->stopPropagation) {
-    event->eventPhase = EVENT_AT_TARGET;
-    listener = temp_list;
+  event->eventPhase = EVENT_AT_TARGET;
+  listener = temp_list;
+  while (listener && !event->stopImmediatePropagation) {
+    JSValueConst args[1];
+    JSValue global_obj = JS_GetGlobalObject(ctx);
+    JSValue result;
 
-    while (listener && !event->stopImmediatePropagation) {
-      JSValueConst args[1];
-      JSValue global_obj = JS_GetGlobalObject(ctx);
-      JSValue event_obj, result;
+    // 设置事件当前目标
+    event->currentTarget = JS_DupValue(ctx, event->target);
 
-      // 设置事件当前目标
-      event->currentTarget = JS_DupValue(ctx, event->target);
+    args[0] = js_event;
 
-      // 创建事件对象传递给监听器
-      event_obj = JS_NewObjectClass(ctx, class_id);
-      JS_SetOpaque(event_obj, event);
-
-      args[0] = event_obj;
-
-      // 调用回调函数
-      if (JS_IsFunction(ctx, listener->callback)) {
-        result = JS_Call(ctx, listener->callback, global_obj, 1, args);
+    // 调用回调函数
+    if (JS_IsFunction(ctx, listener->callback)) {
+      result = JS_Call(ctx, listener->callback, global_obj, 1, args);
+    } else {
+      JSValue handleEvent = JS_GetPropertyStr(ctx, listener->callback, "handleEvent");
+      if (JS_IsFunction(ctx, handleEvent)) {
+        result = JS_Call(ctx, handleEvent, listener->callback, 1, args);
+        JS_FreeValue(ctx, handleEvent);
       } else {
-        JSValue handleEvent = JS_GetPropertyStr(ctx, listener->callback, "handleEvent");
-        if (JS_IsFunction(ctx, handleEvent)) {
-          result = JS_Call(ctx, handleEvent, listener->callback, 1, args);
-          JS_FreeValue(ctx, handleEvent);
-        } else {
-          result = JS_UNDEFINED;
-          JS_FreeValue(ctx, handleEvent);
-        }
+        result = JS_UNDEFINED;
+        JS_FreeValue(ctx, handleEvent);
       }
-
-      if (JS_IsException(result)) {
-        JS_GetException(ctx); // 清除异常
-      }
-
-      JS_FreeValue(ctx, result);
-      JS_FreeValue(ctx, event_obj);
-      JS_FreeValue(ctx, global_obj);
-
-      // 检查是否阻止了默认行为
-      if (event->defaultPrevented)
-        prevented = true;
-
-      // 如果设置了立即停止传播，则退出循环
-      if (event->stopImmediatePropagation)
-        break;
-
-      listener = listener->next;
     }
-  }
 
-  // 冒泡阶段
-  if (event->bubbles && !event->stopPropagation) {
-    event->eventPhase = EVENT_BUBBLING_PHASE;
-    listener = temp_list;
-    while (listener && !event->stopImmediatePropagation) {
-      if (!listener->capture) {
-        JSValueConst args[1];
-        JSValue global_obj = JS_GetGlobalObject(ctx);
-        JSValue event_obj, result;
-
-        // 设置事件当前目标
-        event->currentTarget = JS_DupValue(ctx, event->target);
-
-        // 创建事件对象传递给监听器
-        event_obj = JS_NewObjectClass(ctx, class_id);
-        JS_SetOpaque(event_obj, event);
-
-        args[0] = event_obj;
-
-        // 调用回调函数
-        if (JS_IsFunction(ctx, listener->callback)) {
-          result = JS_Call(ctx, listener->callback, global_obj, 1, args);
-        } else {
-          JSValue handleEvent = JS_GetPropertyStr(ctx, listener->callback, "handleEvent");
-          if (JS_IsFunction(ctx, handleEvent)) {
-            result = JS_Call(ctx, handleEvent, listener->callback, 1, args);
-            JS_FreeValue(ctx, handleEvent);
-          } else {
-            result = JS_UNDEFINED;
-            JS_FreeValue(ctx, handleEvent);
-          }
-        }
-
-        if (JS_IsException(result)) {
-          JS_GetException(ctx); // 清除异常
-        }
-
-        JS_FreeValue(ctx, result);
-        JS_FreeValue(ctx, event_obj);
-        JS_FreeValue(ctx, global_obj);
-
-        // 检查是否阻止了默认行为
-        if (event->defaultPrevented)
-          prevented = true;
-
-        // 如果设置了立即停止传播，则退出循环
-        if (event->stopImmediatePropagation)
-          break;
-      }
-      listener = listener->next;
+    if (JS_IsException(result)) {
+      JS_GetException(ctx); // 清除异常
     }
+
+    JS_FreeValue(ctx, result);
+    JS_FreeValue(ctx, global_obj);
+    JS_FreeValue(ctx, event->currentTarget);
+    event->currentTarget = JS_NULL;
+
+    // 检查是否阻止了默认行为
+    if (event->defaultPrevented)
+      prevented = true;
+
+    // 如果设置了立即停止传播，则退出循环
+    if (event->stopImmediatePropagation)
+      break;
+
+    listener = listener->next;
   }
 
   // 清理临时列表
@@ -590,10 +497,18 @@ static JSValue js_event_target_dispatch_event(JSContext *ctx, JSValueConst this_
   if (!event)
     return JS_ThrowTypeError(ctx, "Invalid event object");
 
+  // 设置事件目标
+  if (!JS_IsNull(event->target) && !JS_IsUndefined(event->target)) {
+    JS_FreeValue(ctx, event->target); // 释放之前的值，如果有的话
+  }
   event->target = JS_DupValue(ctx, this_val);
 
+  JSValue js_event = JS_DupValue(ctx, argv[0]);
   // 调用事件监听器
-  bool result = invoke_event_listeners(ctx, event, target, event->type);
+  bool result = invoke_event_listeners(ctx, event, js_event, target, event->type);
+
+  JS_FreeValue(ctx, js_event);
+  // JS_FreeValue(ctx, event->target);
 
   return JS_NewBool(ctx, result);
 }
@@ -601,16 +516,19 @@ static JSValue js_event_target_dispatch_event(JSContext *ctx, JSValueConst this_
 static JSClassDef js_event_class_def = {
     "Event",
     .finalizer = js_event_finalizer,
+    .gc_mark = js_event_gc_mark,
 };
 
 static JSClassDef js_custom_event_class_def = {
     "CustomEvent",
     .finalizer = js_event_finalizer,
+    .gc_mark = js_event_gc_mark,
 };
 
 static JSClassDef js_event_target_class_def = {
     "EventTarget",
     .finalizer = js_event_target_finalizer,
+    .gc_mark = js_event_target_gc_mark,
 };
 
 static JSCFunctionListEntry js_event_class_props[] = {

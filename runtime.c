@@ -676,7 +676,7 @@ int Worker_Eval_JS(WorkerRuntime *wrt, const char *script, void (*callback)(void
   wctx->callback = callback;
   wctx->callback_arg = callback_arg;
 
-  JSValue result = JS_Eval(ctx, script, strlen(script), "<input>", JS_EVAL_TYPE_MODULE);
+  JSValue result = JS_Eval(ctx, script, strlen(script), "<input>", JS_EVAL_TYPE_GLOBAL);
   if (JS_IsException(result)) {
     JSValue exc = JS_GetException(ctx);
     const char *str = JS_ToCString(ctx, exc);
