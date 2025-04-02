@@ -11,6 +11,8 @@
 #include "../mcwp/event.h"
 #include "../mcwp/headers.c"
 #include "../mcwp/headers.h"
+#include "../mcwp/url.c"
+#include "../mcwp/url.h"
 #include "../runtime.c"
 #include "../runtime.h"
 #include "./file.c"

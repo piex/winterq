@@ -1,0 +1,10 @@
+#ifndef WINTERQ_COMMON_H
+#define WINTERQ_COMMON_H
+
+typedef enum JSIteratorKindEnum {
+  JS_ITERATOR_KIND_KEY,
+  JS_ITERATOR_KIND_VALUE,
+  JS_ITERATOR_KIND_KEY_AND_VALUE,
+} JSIteratorKindEnum;
+
+#endif // WINTERQ_COMMON_H

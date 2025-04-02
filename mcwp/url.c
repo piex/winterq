@@ -1,17 +1,12 @@
 #include <ctype.h>
 #include <stdio.h>
 
+#include "common.h"
 #include "url.h"
 
 static JSClassID js_url_class_id = 0;
 static JSClassID js_url_search_params_class_id = 0;
 static JSClassID js_url_search_params_iterator_class_id = 0;
-
-typedef enum JSIteratorKindEnum {
-  JS_ITERATOR_KIND_KEY,
-  JS_ITERATOR_KIND_VALUE,
-  JS_ITERATOR_KIND_KEY_AND_VALUE,
-} JSIteratorKindEnum;
 
 // 迭代器结构
 typedef struct {
@@ -340,17 +335,19 @@ static JSValue js_url_get_property(JSContext *ctx, JSValueConst this_val, int ma
   case 9: // password
     return JS_NewString(ctx, url->password ? url->password : "");
   case 10: // origin
+      ;
     char origin[512];
     snprintf(origin, sizeof(origin), "%s//%s", url->protocol, url->host);
     return JS_NewString(ctx, origin);
   case 11: // searchParams
+    return JS_UNDEFINED;
   }
 
   return JS_UNDEFINED;
 }
 
 // 创建 URLSearchParams 对象
-static URLSearchParams *url_search_params_new() {
+URLSearchParams *url_search_params_new() {
   URLSearchParams *params = malloc(sizeof(URLSearchParams));
   if (!params)
     return NULL;
@@ -973,7 +970,7 @@ done:
 
 // URLSearchParams.prototype.append 方法
 static JSValue js_url_search_params_append(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-  URLSearchParams *params = get_url_search_params(ctx, this_val);
+  URLSearchParams *params = JS_GetOpaque(this_val, js_url_search_params_class_id);
   if (!params)
     return JS_EXCEPTION;
 
@@ -1004,7 +1001,7 @@ static JSValue js_url_search_params_append(JSContext *ctx, JSValueConst this_val
 
 // URLSearchParams.prototype.delete 方法
 static JSValue js_url_search_params_delete(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-  URLSearchParams *params = get_url_search_params(ctx, this_val);
+  URLSearchParams *params = JS_GetOpaque(this_val, js_url_search_params_class_id);
   if (!params)
     return JS_EXCEPTION;
 
@@ -1050,7 +1047,7 @@ static JSValue js_url_search_params_get(JSContext *ctx, JSValueConst this_val, i
 
 // URLSearchParams.prototype.getAll 方法
 static JSValue js_url_search_params_get_all(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-  URLSearchParams *params = get_url_search_params(ctx, this_val);
+  URLSearchParams *params = JS_GetOpaque(this_val, js_url_search_params_class_id);
   if (!params)
     return JS_EXCEPTION;
 
@@ -1100,7 +1097,7 @@ static JSValue js_url_search_params_get_all(JSContext *ctx, JSValueConst this_va
 
 // URLSearchParams.prototype.has 方法
 static JSValue js_url_search_params_has(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-  URLSearchParams *params = get_url_search_params(ctx, this_val);
+  URLSearchParams *params = JS_GetOpaque(this_val, js_url_search_params_class_id);
   if (!params)
     return JS_EXCEPTION;
 
@@ -1120,7 +1117,7 @@ static JSValue js_url_search_params_has(JSContext *ctx, JSValueConst this_val, i
 
 // URLSearchParams.prototype.set 方法
 static JSValue js_url_search_params_set(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-  URLSearchParams *params = get_url_search_params(ctx, this_val);
+  URLSearchParams *params = JS_GetOpaque(this_val, js_url_search_params_class_id);
   if (!params)
     return JS_EXCEPTION;
 
@@ -1151,7 +1148,7 @@ static JSValue js_url_search_params_set(JSContext *ctx, JSValueConst this_val, i
 
 // URLSearchParams.prototype.sort 方法
 static JSValue js_url_search_params_sort(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-  URLSearchParams *params = get_url_search_params(ctx, this_val);
+  URLSearchParams *params = JS_GetOpaque(this_val, js_url_search_params_class_id);
   if (!params)
     return JS_EXCEPTION;
 
@@ -1178,7 +1175,7 @@ static JSValue js_url_search_params_to_string(JSContext *ctx, JSValueConst this_
 
 // URLSearchParams.prototype.forEach 方法
 static JSValue js_url_search_params_foreach(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-  URLSearchParams *params = get_url_search_params(ctx, this_val);
+  URLSearchParams *params = JS_GetOpaque(this_val, js_url_search_params_class_id);
   if (!params)
     return JS_EXCEPTION;
 
@@ -1223,7 +1220,7 @@ static JSValue js_url_search_params_foreach(JSContext *ctx, JSValueConst this_va
 }
 
 static JSValue js_create_url_search_params_iterator(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic) {
-  URLSearchParams *params = get_url_search_params(ctx, this_val);
+  URLSearchParams *params = JS_GetOpaque(this_val, js_url_search_params_class_id);
   if (!params)
     return JS_EXCEPTION;
 

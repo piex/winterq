@@ -6,17 +6,12 @@
 
 #include <quickjs.h>
 
+#include "common.h"
 #include "cutils.h"
 #include "headers.h"
 
 static JSClassID js_headers_class_id = 0;
 static JSClassID js_headers_iterator_class_id = 0;
-
-typedef enum JSIteratorKindEnum {
-  JS_ITERATOR_KIND_KEY,
-  JS_ITERATOR_KIND_VALUE,
-  JS_ITERATOR_KIND_KEY_AND_VALUE,
-} JSIteratorKindEnum;
 
 // 迭代器结构
 typedef struct {

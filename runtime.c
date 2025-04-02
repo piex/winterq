@@ -5,6 +5,7 @@
 #include "mcwp/console.h"
 #include "mcwp/event.h"
 #include "mcwp/headers.h"
+#include "mcwp/url.h"
 #include "runtime.h"
 
 #define MAX_MICROTASK_ITERATIONS 1000
@@ -652,6 +653,7 @@ WorkerContext *Worker_NewContext(WorkerRuntime *wrt) {
   js_init_console(ctx);
   js_init_timer(ctx);
   js_init_headers(ctx);
+  js_init_url(ctx);
   js_init_event(ctx);
 
   SAFE_JS_FREEVALUE(ctx, global);

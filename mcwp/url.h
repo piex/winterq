@@ -42,5 +42,6 @@ void js_init_url(JSContext *ctx);
 
 bool url_is_valid_protocol(const char *protocol);
 bool url_is_valid_hostname(const char *hostname);
+URLSearchParams *url_search_params_new();
 
 #endif // WINTERQ_URL_H
